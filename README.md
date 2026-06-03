@@ -182,11 +182,13 @@ contract for those item classes.
 
 ### Running with Docker Compose
 
-Use the local integration stack in two steps so the one-shot indexer finishes
-writing `examples/local/output/summary.json` before the MCP server starts:
+Use the local integration stack in three steps so STAPI stays available in the
+background, the one-shot indexer finishes writing
+`examples/local/output/summary.json`, and then the MCP server starts:
 
 ```powershell
-docker compose up --build indexer
+docker compose up -d stapi
+docker compose run --rm --build --no-deps indexer
 docker compose run --rm -i --no-deps mcp
 ```
 

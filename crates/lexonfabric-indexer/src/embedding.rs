@@ -35,8 +35,6 @@ pub enum ConfiguredEmbeddingProviderError {
     ClientBuild(reqwest::Error),
     #[error("missing environment variable {var} for the embedding provider API key")]
     MissingApiKey { var: String },
-    #[error("embedding input must be valid UTF-8 text: {0}")]
-    NonUtf8Input(#[from] std::string::FromUtf8Error),
     #[error("embedding service returned no vectors")]
     MissingVector,
     #[error("embedding vector length {actual} does not match requested dims {expected}")]
@@ -110,7 +108,7 @@ impl LocalOpenAiEmbeddingProvider {
         input: &EmbeddingInput,
         spec: &EmbeddingSpec,
     ) -> Result<Vec<u8>, ConfiguredEmbeddingProviderError> {
-        let text = String::from_utf8(input.body.clone())?;
+        let text = String::from_utf8_lossy(&input.body);
         let endpoint = format!("{}/v1/embeddings", self.base_url);
         let request_body = EmbeddingRequestBody {
             input: &text,
@@ -421,9 +419,6 @@ mod tests {
                         Ok(0) => break,
                         Ok(read) => {
                             request.extend_from_slice(&buffer[..read]);
-                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                                break;
-                            }
                         }
                         Err(error)
                             if matches!(

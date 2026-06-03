@@ -14,7 +14,7 @@
 - **UR-4 [KNOWN]:** The indexer runs as a Linux Docker container in batch mode.
 - **UR-5 [KNOWN]:** A batch accepts a collection of items to index, such as mailboxes and RFCs.
 - **UR-6 [KNOWN]:** The resulting blocks are stored either on the local filesystem or in Azure Blob Storage.
-- **UR-7 [KNOWN]:** Embeddings are obtained through an OpenAPI-compatible HTTP embedding API, targeting either a local STAPI container or Azure OpenAI.
+- **UR-7 [KNOWN]:** Embeddings are obtained through an OpenAI-compatible HTTP embedding API, targeting either a local STAPI container or Azure OpenAI.
 - **UR-8 [KNOWN]:** Batch and recovery behavior are owned by the LexonGraph API itself; produced blocks are immutable and hash-addressed, so reruns are idempotent.
 - **UR-9 [KNOWN]:** The delegated indexer crate defines `ContentResolver<R>` and consumes `BlockStore` from `lexongraph-block-store` plus `EmbeddingProvider` from `lexongraph-embeddings-trait`.
 - **UR-10 [KNOWN]:** Implement the minimal viable product of the `lexonfabric-indexer` feature using `docs/specs/lexonfabric-indexer/*` as the source of truth.
@@ -120,7 +120,7 @@ LexonFabric SHALL provide a concrete implementation of `lexongraph_block_store::
 
 #### RQ-INDEXER-006 - Embedding provider integration
 
-LexonFabric SHALL obtain embeddings through a provider that satisfies `lexongraph_embeddings_trait::EmbeddingProvider` and is reached through an OpenAPI-compatible HTTP embedding interface.
+LexonFabric SHALL obtain embeddings through a provider that satisfies `lexongraph_embeddings_trait::EmbeddingProvider` and is reached through an OpenAI-compatible HTTP embedding interface.
 
 - **Architectural target embedding profiles [KNOWN]:**
   - local STAPI-compatible embedding service

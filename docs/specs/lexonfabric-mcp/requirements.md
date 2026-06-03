@@ -13,7 +13,7 @@
 - **UR-MCP-3 [KNOWN]:** The MCP server must return content chunks from search.
 - **UR-MCP-4 [KNOWN]:** The MCP server must expose APIs that return specific emails, threads, or documents by name.
 - **UR-MCP-5 [KNOWN]:** Search results should also return the name of the document, email, or thread the chunk came from when that name is available from the delegated search API.
-- **UR-MCP-6 [KNOWN]:** All actual searching belongs to the underlying `lexongraph` crate rather than to `lexonfabric-mcp`.
+- **UR-MCP-6 [KNOWN]:** All actual searching belongs to the delegated LexonGraph search APIs rather than to `lexonfabric-mcp`.
 - **UR-MCP-7 [KNOWN]:** `lexonfabric-mcp` provides the appropriate trait plugins or adapters for block storage and similar delegated dependencies, analogous to `lexonfabric-indexer`.
 - **UR-MCP-8 [KNOWN]:** The architecture must remain extensible to future content types beyond the initial email and document focus.
 - **UR-MCP-9 [KNOWN]:** Local and testing operations use local filesystem-backed content plus local embeddings, while production uses Azure Blob Storage plus Azure OpenAI-backed embeddings.
@@ -139,7 +139,7 @@ The `lexonfabric-mcp` requirements SHALL remain limited to search-serving orches
 
 LexonFabric SHALL remain subordinate to the public contracts owned by the delegated LexonGraph search APIs and the delegated dependency traits they consume, and SHALL NOT redefine their search semantics, result-ranking semantics, or storage-contract semantics within this repository.
 
-- **Rationale [KNOWN]:** The user request explicitly assigns actual searching to the underlying `lexongraph` crate.
+- **Rationale [KNOWN]:** The user request explicitly assigns actual searching to the delegated LexonGraph search APIs.
 - **Traceability:** UR-MCP-2, UR-MCP-6, UR-MCP-7
 
 #### RQ-MCP-012 - Stable abstraction boundary

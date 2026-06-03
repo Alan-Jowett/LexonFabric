@@ -166,11 +166,16 @@ LexonFabric SHALL keep content resolution, block storage, and embedding-provider
   - `README.md:42-49`
   - `README.md:51-59`
   - `README.md:61-80`
-  - external LexonGraph crate reference: `crates/lexongraph-indexer/src/lib.rs:24-26`
-  - external LexonGraph crate reference: `crates/lexongraph-indexer/src/lib.rs:29-37`
-  - external LexonGraph crate reference: `crates/lexongraph-indexer/src/lib.rs:104-107`
-  - external LexonGraph crate reference: `crates/lexongraph-block-store/src/lib.rs:28-32`
-  - external LexonGraph crate reference: `crates/lexongraph-embeddings-trait/src/lib.rs:20-33`
+  - external LexonGraph repository source (not vendored in LexonFabric):
+    `crates/lexongraph-indexer/src/lib.rs:24-26`
+  - external LexonGraph repository source (not vendored in LexonFabric):
+    `crates/lexongraph-indexer/src/lib.rs:29-37`
+  - external LexonGraph repository source (not vendored in LexonFabric):
+    `crates/lexongraph-indexer/src/lib.rs:104-107`
+  - external LexonGraph repository source (not vendored in LexonFabric):
+    `crates/lexongraph-block-store/src/lib.rs:28-32`
+  - external LexonGraph repository source (not vendored in LexonFabric):
+    `crates/lexongraph-embeddings-trait/src/lib.rs:20-33`
   - user clarification messages in this session
 - **Excluded for now [KNOWN]:**
   - Rust implementation file paths, crate manifests, and test artifacts within this repository, because no such repository files exist yet

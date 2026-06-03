@@ -249,6 +249,8 @@ mod tests {
 
     #[test]
     fn relative_paths_are_resolved_against_request_directory() {
+        let request_root = PathBuf::from("request-root");
+        let relative_document_path = PathBuf::from("docs").join("sample.txt");
         let request = BatchRequest {
             environment: EnvironmentConfig::Local {
                 block_store_root: PathBuf::from("blocks"),
@@ -267,18 +269,16 @@ mod tests {
             },
             block_size_target: default_block_size_target(),
             items: vec![BatchItemConfig::Document {
-                path: PathBuf::from("docs\\sample.txt"),
+                path: relative_document_path.clone(),
                 metadata: BTreeMap::new(),
             }],
         };
 
-        let items = request
-            .to_index_items(Path::new("C:\\request-root"))
-            .unwrap();
+        let items = request.to_index_items(&request_root).unwrap();
 
         match &items[0].content_ref {
             ContentRef::Document { path } => {
-                assert_eq!(path, &PathBuf::from("C:\\request-root\\docs\\sample.txt"));
+                assert_eq!(path, &request_root.join(relative_document_path));
             }
             ContentRef::Mailbox { .. } => panic!("expected a document content ref"),
         }

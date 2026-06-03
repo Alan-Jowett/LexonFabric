@@ -234,6 +234,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::Instant;
 
     use super::*;
 
@@ -389,10 +390,27 @@ mod tests {
 
     fn spawn_test_server(responses: Vec<String>, requests: Arc<Mutex<Vec<String>>>) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
-            for response in responses {
-                let (mut stream, _) = listener.accept().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut response_iter = responses.into_iter();
+            while Instant::now() < deadline {
+                let Some(response) = response_iter.next() else {
+                    break;
+                };
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        response_iter = std::iter::once(response)
+                            .chain(response_iter)
+                            .collect::<Vec<_>>()
+                            .into_iter();
+                        continue;
+                    }
+                    Err(error) => panic!("failed to accept embedding test connection: {error}"),
+                };
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();

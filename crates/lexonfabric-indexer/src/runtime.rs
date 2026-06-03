@@ -107,7 +107,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use tempfile::tempdir;
 
@@ -225,12 +225,23 @@ mod tests {
 
     fn spawn_embedding_server(expected_requests: usize) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let seen = Arc::new(AtomicUsize::new(0));
         let seen_for_thread = Arc::clone(&seen);
         let handle = thread::spawn(move || {
-            while seen_for_thread.load(Ordering::SeqCst) < expected_requests {
-                let (mut stream, _) = listener.accept().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while seen_for_thread.load(Ordering::SeqCst) < expected_requests
+                && Instant::now() < deadline
+            {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("failed to accept runtime test connection: {error}"),
+                };
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();

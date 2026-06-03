@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft specification patch derived from the MVP implementation-scope updates in
+Approved specification baseline for the MVP implementation scope in
 `docs/specs/lexonfabric-mcp/requirements.md`.
 
 ## Scope

@@ -2,8 +2,8 @@
 
 ## Document Status
 
-- **Phase:** Phase 1 - Requirements Discovery
-- **Status:** Draft requirements patch for the MVP implementation scope
+- **Phase:** Phase 4 - User Review of Specifications
+- **Status:** Approved specification baseline for the MVP implementation scope
 - **Scope:** `lexonfabric-mcp` search-serving integration boundary and first in-repo MVP slice
 
 ## USER-REQUEST

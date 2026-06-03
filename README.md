@@ -157,6 +157,11 @@ First generate the local block store and summary:
 cargo run -p lexonfabric-indexer -- run --request examples\local\request.sample.json --summary-out examples\local\output\summary.json
 ```
 
+The sample MCP config uses `http://stapi:8080` for the Docker Compose network.
+For a host-side `cargo run`, update `examples\local\mcp.request.sample.json` to
+use a host-reachable endpoint such as `http://localhost:8080` before starting
+the server.
+
 Then start the MCP server over stdio:
 
 ```powershell
@@ -177,14 +182,15 @@ contract for those item classes.
 
 ### Running with Docker Compose
 
-The same local integration stack can now start the MCP server alongside the
-existing indexer and STAPI services:
+Use the local integration stack in two steps so the one-shot indexer finishes
+writing `examples/local/output/summary.json` before the MCP server starts:
 
 ```powershell
+docker compose up --build indexer
 docker compose run --rm -i mcp
 ```
 
-That stack starts:
+That workflow uses:
 
 - `stapi` at `http://localhost:8080`
 - the `lexonfabric-indexer` batch container

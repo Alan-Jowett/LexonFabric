@@ -83,7 +83,7 @@ Inspect the delegated email chunk items produced from a normalized email
 artifact.
 
 **Pass condition:** each delegated email item embeds chunk text, carries a
-stable normalized-email-artifact reference, duplicates enough message metadata
+stable normalized email artifact reference, duplicates enough message metadata
 for the common retrieval/rendering path, preserves chained provenance from
 chunk to normalized email artifact to mailbox provenance artifact, and carries
 a stable chunk locator that makes the specific chunk identifiable during

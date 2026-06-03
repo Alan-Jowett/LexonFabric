@@ -91,7 +91,7 @@ through this one contract rather than splitting the batch surface by content
 class.
 
 For email, a mailbox item is a source container that LexonFabric expands into
-stored mailbox and normalized-email artifacts plus chunk-sized delegated index
+stored mailbox and normalized email artifacts plus chunk-sized delegated index
 items before invoking `lexongraph-indexer`.
 
 **Traces to:** RQ-INDEXER-001, RQ-INDEXER-002
@@ -366,7 +366,7 @@ LexonFabric-owned verification artifacts validate:
 - correct delegation to `lexongraph-indexer`
 - correct selection and use of content-resolution, block-store, and
   embedding-provider adapters
-- correct mailbox retention, normalized-email artifact derivation, and chained
+- correct mailbox retention, normalized email artifact derivation, and chained
   provenance
 - correct shaping of chunk-sized delegated email items
 - preservation of stable batch contracts across environments

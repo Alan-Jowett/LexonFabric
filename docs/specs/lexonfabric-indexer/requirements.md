@@ -94,7 +94,7 @@
 
 ### BA-INDEXER-009
 
-- **Before [KNOWN]:** The requirements did not define a canonical normalized-email artifact or a stable retrieval reference from indexed chunks back to full-message content.
+- **Before [KNOWN]:** The requirements did not define a canonical normalized email artifact or a stable retrieval reference from indexed chunks back to full-message content.
 - **After [KNOWN]:** The requirements define normalized email artifacts as hash-addressed retrieval targets referenced from indexed chunks, allowing clients to use chunk text directly or follow the artifact reference to the full normalized email without reparsing mailbox blobs.
 
 ### BA-INDEXER-010
@@ -233,7 +233,7 @@ LexonFabric SHALL preserve idempotent rerun behavior for repeated indexing of th
 
 - **Mechanism owner [KNOWN]:** The underlying LexonGraph API owns batch and recovery semantics.
 - **Required property [KNOWN]:** Produced blocks are immutable and identified by hash, so reruns must not create distinct logical outputs for unchanged content.
-- **Email artifact implication [INFERRED]:** Repeated normalization of semantically unchanged email content should resolve to the same normalized-email artifact identity and the same derived chunk identities under a stable normalization and chunking policy.
+- **Email artifact implication [INFERRED]:** Repeated normalization of semantically unchanged email content should resolve to the same normalized email artifact identity and the same derived chunk identities under a stable normalization and chunking policy.
 - **Traceability:** UR-8, UR-16
 
 #### RQ-INDEXER-008A - Local integration composition
@@ -319,4 +319,4 @@ LexonFabric SHALL keep content resolution, block storage, and embedding-provider
   - user clarification message in this session: "Can we use the text_splitter crate for now, with the option to use huggingface tokenizer later for semantic chunking? Agree to the rest"
 - **Excluded for now [KNOWN]:**
   - Detailed Rust implementation file paths, crate manifests, Docker assets, and test artifacts, because this requirements document captures the semantic contract and leaves implementation realization to downstream design, validation, and code-review artifacts
-  - Exact normalized-email CBOR schema, exact duplicated chunk metadata list, and the specific chunking library choice, because those belong to downstream design and validation artifacts rather than requirements
+  - Exact normalized email CBOR schema, exact duplicated chunk metadata list, and the specific chunking library choice, because those belong to downstream design and validation artifacts rather than requirements

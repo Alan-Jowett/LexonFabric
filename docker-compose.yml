@@ -29,7 +29,6 @@ services:
       dockerfile: crates/lexonfabric-mcp/Dockerfile
     depends_on:
       - stapi
-      - indexer
     working_dir: /workspace
     volumes:
       - .:/workspace

@@ -187,12 +187,13 @@ writing `examples/local/output/summary.json` before the MCP server starts:
 
 ```powershell
 docker compose up --build indexer
-docker compose run --rm -i mcp
+docker compose run --rm -i --no-deps mcp
 ```
 
 That workflow uses:
 
-- `stapi` at `http://localhost:8080`
+- `stapi` published to the host at `http://localhost:8080` and reached from the
+  Compose network as `http://stapi:8080`
 - the `lexonfabric-indexer` batch container
 - the `lexonfabric-mcp` stdio server container
 - a named Docker volume mounted into both containers at

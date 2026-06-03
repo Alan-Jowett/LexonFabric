@@ -59,6 +59,7 @@ pub async fn run_request(
     request: BatchRequest,
 ) -> Result<BatchSummary, RuntimeError> {
     let items = request.to_index_items(request_dir)?;
+    let _ = request.environment.local_embedding()?;
     let embedding_provider = ConfiguredEmbeddingProvider::from_environment(&request.environment)?;
     let block_store = ConfiguredBlockStore::from_environment(request_dir, &request.environment);
     let indexer = Indexer::with_defaults(LocalFilesystemContentResolver, embedding_provider);
@@ -101,6 +102,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::thread;
     use std::time::Duration;
 
@@ -124,12 +129,12 @@ mod tests {
         .unwrap();
         fs::write(&document_path, b"document body\n").unwrap();
 
-        let server = spawn_embedding_server();
+        let server = spawn_embedding_server(4);
         let request = BatchRequest {
             environment: EnvironmentConfig::Local {
                 block_store_root: Path::new("blocks").to_path_buf(),
                 embedding: LocalEmbeddingConfig {
-                    base_url: server.clone(),
+                    base_url: server.base_url.clone(),
                     model: "all-MiniLM-L6-v2".into(),
                     api_key_env: None,
                     request_timeout_secs: 5,
@@ -169,13 +174,62 @@ mod tests {
             fs::read_dir(temp.path().join("blocks")).unwrap().count(),
             first.block_count
         );
+        server.join();
     }
 
-    fn spawn_embedding_server() -> String {
+    #[tokio::test]
+    async fn empty_local_embedding_base_url_is_rejected_as_config_error() {
+        let request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: String::new(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            items: vec![BatchItemConfig::Document {
+                path: Path::new("doc.txt").to_path_buf(),
+                metadata: BTreeMap::new(),
+            }],
+        };
+
+        let error = run_request(Path::new("C:\\request-root"), request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeError::Config(ConfigError::MissingLocalEmbeddingBaseUrl)
+        ));
+    }
+
+    struct TestServer {
+        base_url: String,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl TestServer {
+        fn join(self) {
+            self.handle.join().unwrap();
+        }
+    }
+
+    fn spawn_embedding_server(expected_requests: usize) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        thread::spawn(move || {
-            loop {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let seen_for_thread = Arc::clone(&seen);
+        let handle = thread::spawn(move || {
+            while seen_for_thread.load(Ordering::SeqCst) < expected_requests {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
@@ -189,8 +243,13 @@ mod tests {
                 );
                 stream.write_all(response.as_bytes()).unwrap();
                 stream.flush().unwrap();
+                seen_for_thread.fetch_add(1, Ordering::SeqCst);
             }
         });
-        format!("http://{}", address)
+
+        TestServer {
+            base_url: format!("http://{}", address),
+            handle,
+        }
     }
 }

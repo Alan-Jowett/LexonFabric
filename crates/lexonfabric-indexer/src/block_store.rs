@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use lexongraph_block::{Block, BlockHash, serialize_block};
@@ -59,8 +60,7 @@ impl BlockStore for LocalFilesystemBlockStore {
             .map_err(|error| BlockStoreError::BackendFailure(error.to_string()))?;
         let path = self.path_for_hash(&serialized.hash);
         if !path.exists() {
-            fs::write(&path, serialized.bytes)
-                .map_err(|error| BlockStoreError::BackendFailure(error.to_string()))?;
+            self.write_block_atomically(&path, &serialized.bytes)?;
         }
         Ok(serialized.hash)
     }
@@ -111,6 +111,53 @@ impl BlockStore for ConfiguredBlockStore {
             Self::Local(store) => store.get(block_id),
             Self::AzureBlob(store) => store.get(block_id),
         }
+    }
+}
+
+impl LocalFilesystemBlockStore {
+    fn write_block_atomically(&self, path: &Path, bytes: &[u8]) -> Result<(), BlockStoreError> {
+        for attempt in 0..16u32 {
+            let temp_path = path.with_extension(format!("tmp-{}-{attempt}", std::process::id()));
+            let open_result = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temp_path);
+
+            let mut file = match open_result {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(BlockStoreError::BackendFailure(error.to_string()));
+                }
+            };
+
+            if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+                let _ = fs::remove_file(&temp_path);
+                return Err(BlockStoreError::BackendFailure(error.to_string()));
+            }
+            drop(file);
+
+            if path.exists() {
+                let _ = fs::remove_file(&temp_path);
+                return Ok(());
+            }
+
+            match fs::rename(&temp_path, path) {
+                Ok(()) => return Ok(()),
+                Err(_error) if path.exists() => {
+                    let _ = fs::remove_file(&temp_path);
+                    return Ok(());
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(BlockStoreError::BackendFailure(error.to_string()));
+                }
+            }
+        }
+
+        Err(BlockStoreError::BackendFailure(
+            "failed to allocate a temporary path for atomic block writes".into(),
+        ))
     }
 }
 

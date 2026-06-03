@@ -1,6 +1,6 @@
 services:
   stapi:
-    image: ghcr.io/substratusai/stapi:latest
+    image: ghcr.io/substratusai/stapi:v2.2.2-3
     ports:
       - "8080:8080"
 

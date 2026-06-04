@@ -37,6 +37,29 @@ or dedicated Rust crate in the first increment.
 
 **Traces to:** RQ-SCALE-003A, RQ-SCALE-009A, DSG-LST-002, DSG-LST-008
 
+### VAL-LST-002A
+
+Inspect the Docker Compose entrypoint for `lexonfabric-scale-test`.
+
+**Pass condition:** the tool exposes a supported Docker Compose user entrypoint
+for the approved local workflow so Windows-hosted local development does not
+depend on host bash availability.
+
+**Traces to:** RQ-SCALE-003B, RQ-SCALE-003C, RQ-SCALE-009B, DSG-LST-002,
+DSG-LST-002A, DSG-LST-008
+
+### VAL-LST-002B
+
+Inspect the supported bash and Docker Compose entrypoints against the wrapper
+contract.
+
+**Pass condition:** both entrypoints preserve the same ordered workflow
+semantics, output artifact family, and downstream indexer contract rather than
+creating divergent `lexonfabric-scale-test` behaviors.
+
+**Traces to:** RQ-SCALE-003C, RQ-SCALE-003D, RQ-SCALE-010, DSG-LST-003,
+DSG-LST-005, DSG-LST-010
+
 ### VAL-LST-003
 
 Execute a representative local run with one rsync URL.
@@ -49,6 +72,18 @@ produces root handoff output in the approved stage order.
 **Traces to:** RQ-SCALE-002, RQ-SCALE-003, RQ-SCALE-004, RQ-SCALE-005,
 RQ-SCALE-006, RQ-SCALE-007, DSG-LST-003, DSG-LST-004, DSG-LST-005,
 DSG-LST-006, DSG-LST-007
+
+### VAL-LST-003A
+
+Execute a representative local run with one rsync URL through the Docker
+Compose entrypoint.
+
+**Pass condition:** the Compose-launched run exercises the same rsync ->
+discovery -> generated request/config -> delegated parser/indexer -> root
+handoff stages without requiring host bash on Windows.
+
+**Traces to:** RQ-SCALE-003B, RQ-SCALE-003D, RQ-SCALE-009B, DSG-LST-002A,
+DSG-LST-003, DSG-LST-008
 
 ### VAL-LST-004
 
@@ -107,10 +142,12 @@ DSG-LST-006, DSG-LST-010
 Inspect the executable scope against the production boundary.
 
 **Pass condition:** the wrapper is executable for local/testing only, remains
-compatible with the repository's container-oriented local profile, and does not
-attempt to specify the production ARM/Bicep plus Azure Functions workflow.
+compatible with the repository's container-oriented local profile, remains
+usable from Windows-hosted local development through Docker Compose, and does
+not attempt to specify the production ARM/Bicep plus Azure Functions workflow.
 
-**Traces to:** RQ-SCALE-009, RQ-SCALE-009A, DSG-LST-008
+**Traces to:** RQ-SCALE-009, RQ-SCALE-009A, RQ-SCALE-009B, RQ-SCALE-009C,
+DSG-LST-008
 
 ### VAL-LST-010
 

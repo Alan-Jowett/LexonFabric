@@ -22,6 +22,10 @@
 - **UR-SCALE-12 [KNOWN]:** This tool could be as simple as a Linux bash script.
 - **UR-SCALE-13 [INFERRED]:** `lexonfabric-scale-test` should reuse existing LexonFabric request and output contracts where practical rather than inventing a second indexing protocol.
 - **UR-SCALE-14 [ASSUMPTION]:** When multiple rsync URLs are provided in one run, the tool produces one combined run output and one root handoff artifact for that run.
+- **UR-SCALE-15 [KNOWN]:** `lexonfabric-scale-test` should also be wrapped in a Docker Compose workflow.
+- **UR-SCALE-16 [KNOWN]:** The motivation for the Compose wrapper is Windows developer usability because the development box does not support bash.
+- **UR-SCALE-17 [KNOWN]:** Linux users should be able to use either the direct bash entrypoint or the Docker Compose entrypoint, while Windows users should use Docker Compose.
+- **UR-SCALE-18 [INFERRED]:** Docker Compose must be a supported user-facing entrypoint for the same local stress-test workflow rather than a second divergent workflow.
 
 ## Change Manifest
 
@@ -34,6 +38,9 @@
 | CM-SCALE-005 | Add | Constrain the first realization to a lightweight Linux-local operator form such as a bash script | UR-SCALE-10, UR-SCALE-12 |
 | CM-SCALE-006 | Add | Preserve local-only scope while keeping production orchestration out of this increment | UR-SCALE-10, UR-SCALE-11 |
 | CM-SCALE-007 | Add | Require stable contract reuse so the wrapper composes existing LexonFabric request and output shapes where practical | UR-SCALE-13, UR-SCALE-14 |
+| CM-SCALE-008 | Revise | Expand the first realization from bash-capable local operation to dual entrypoint local operation supporting both direct shell use and Docker Compose | UR-SCALE-12, UR-SCALE-15, UR-SCALE-17 |
+| CM-SCALE-009 | Add | Require a Docker Compose user entrypoint suitable for Windows-hosted local usage | UR-SCALE-15, UR-SCALE-16, UR-SCALE-17 |
+| CM-SCALE-010 | Add | Preserve one shared workflow and artifact model across the bash and Docker Compose entrypoints | UR-SCALE-17, UR-SCALE-18 |
 
 ## Before / After
 
@@ -61,6 +68,16 @@
 
 - **Before [KNOWN]:** MCP-serving preparation was still a plausible wrapper output.
 - **After [KNOWN]:** MCP config generation is explicitly out of scope; the required output is the block tree and root handoff artifact.
+
+### BA-SCALE-006
+
+- **Before [KNOWN]:** The first realization allowed a lightweight Linux bash script, but did not define a Windows-friendly user entrypoint when host bash is unavailable.
+- **After [KNOWN]:** The first realization must also expose a Docker Compose user entrypoint so the same local stress-test workflow remains usable from Windows hosts.
+
+### BA-SCALE-007
+
+- **Before [KNOWN]:** The wrapper requirements described one local workflow but did not distinguish between workflow semantics and the user-facing entrypoint used to launch that workflow.
+- **After [KNOWN]:** The requirements define one wrapper workflow with dual supported local entrypoints: direct bash on Linux and Docker Compose on Linux or Windows.
 
 ## Requirements
 
@@ -100,6 +117,30 @@ The first `lexonfabric-scale-test` realization SHALL be allowed to use a simple 
 - **Constraint [KNOWN]:** The implementation vehicle may stay lightweight so long as it preserves the approved ordered workflow and output artifacts.
 - **Non-goal [KNOWN]:** This increment does not require a dedicated Rust crate, long-lived service, or control-plane component.
 - **Traceability:** UR-SCALE-12
+
+#### RQ-SCALE-003B - Docker Compose user entrypoint
+
+`lexonfabric-scale-test` SHALL provide a Docker Compose-based user entrypoint for the approved local stress-test workflow.
+
+- **Required property [KNOWN]:** The Compose entrypoint must execute the same rsync -> discovery -> generated request/config -> delegated parser/indexer -> root handoff flow.
+- **Traceability:** UR-SCALE-15, UR-SCALE-16, UR-SCALE-17
+
+#### RQ-SCALE-003C - Dual local entrypoint support
+
+For the first local/testing increment, `lexonfabric-scale-test` SHALL support both:
+
+1. a direct Linux-oriented shell entrypoint
+2. a Docker Compose entrypoint
+
+- **Platform intent [KNOWN]:** Linux users may use either entrypoint; Windows users rely on Docker Compose.
+- **Traceability:** UR-SCALE-16, UR-SCALE-17
+
+#### RQ-SCALE-003D - Shared workflow semantics across entrypoints
+
+The bash and Docker Compose entrypoints SHALL preserve the same wrapper-owned workflow semantics, output artifact family, and downstream indexer contract.
+
+- **Constraint [INFERRED]:** Docker Compose must not introduce a second, divergent `lexonfabric-scale-test` contract.
+- **Traceability:** UR-SCALE-17, UR-SCALE-18
 
 #### RQ-SCALE-004 - Delegated parser/indexer use
 
@@ -149,7 +190,22 @@ The first `lexonfabric-scale-test` increment SHALL be executable for large-scale
 The first executable `lexonfabric-scale-test` realization SHALL target a Linux-oriented local execution environment compatible with the existing containerized local workflow.
 
 - **Rationale [INFERRED]:** A bash-script realization implies a Linux-shaped operator environment and aligns with the repository's existing container-oriented local profile.
-- **Traceability:** UR-SCALE-5, UR-SCALE-10, UR-SCALE-12
+- **Compatibility note [KNOWN]:** This Linux-oriented execution shape may still be launched from a Windows host through Docker Compose.
+- **Traceability:** UR-SCALE-5, UR-SCALE-10, UR-SCALE-12, UR-SCALE-16
+
+#### RQ-SCALE-009B - Windows-friendly local usability
+
+The first `lexonfabric-scale-test` increment SHALL remain executable for Windows-hosted local development through Docker Compose even when bash is unavailable on the host.
+
+- **Boundary [KNOWN]:** This is a local/testing usability requirement, not a production orchestration requirement.
+- **Traceability:** UR-SCALE-15, UR-SCALE-16, UR-SCALE-17
+
+#### RQ-SCALE-009C - Linux optionality preservation
+
+The addition of Docker Compose support SHALL NOT remove the direct Linux shell entrypoint for `lexonfabric-scale-test`.
+
+- **Rationale [KNOWN]:** Linux users should retain either launch mode.
+- **Traceability:** UR-SCALE-17
 
 #### RQ-SCALE-010 - Stable contract reuse
 
@@ -204,7 +260,7 @@ When multiple rsync URLs are provided in one run, `lexonfabric-scale-test` SHALL
 |---|---|---|
 | Indexing remains separate from search serving | Preserved | The wrapper is limited to local orchestration and delegated execution |
 | `lexonfabric-indexer` remains focused on indexing contracts | Preserved | The rsync stress-test flow is explicitly outside the indexer boundary |
-| Local/testing remains self-contained and batch-oriented | Preserved | The wrapper remains Linux-local and stage-ordered around batch execution |
+| Local/testing remains self-contained and batch-oriented | Preserved | The wrapper remains stage-ordered and container-oriented while supporting both direct Linux shell use and Docker Compose launch |
 | Production seams remain open | Preserved | Production orchestration remains a separate future workflow |
 | Future content extensibility remains intact | Preserved | The wrapper adds mailbox stress testing now without closing off later document handling |
 | LexonFabric remains subordinate to LexonGraph contracts | Preserved | The wrapper drives existing downstream flows rather than redefining block construction |
@@ -215,6 +271,8 @@ When multiple rsync URLs are provided in one run, `lexonfabric-scale-test` SHALL
 - **Q-SCALE-002 [UNKNOWN]:** Should the generated request/config artifact be persisted as a durable fixture, ephemeral run output, or both?
 - **Q-SCALE-003 [UNKNOWN]:** What metadata from the rsync source URL, if any, must be preserved in generated mailbox batch items?
 - **Q-SCALE-004 [UNKNOWN]:** If one rsync source is unreachable during a multi-source run, should the wrapper fail the whole run or allow partial stress-test completion?
+- **Q-SCALE-005 [UNKNOWN]:** Should the Docker Compose entrypoint wrap the existing bash implementation inside a Linux container, or should Compose invoke a dedicated container command path that reproduces the same workflow semantics without host bash?
+- **Q-SCALE-006 [UNKNOWN]:** How should rsync source inputs be passed into the Docker Compose entrypoint for Windows users: a mounted sources file, inline environment variables, or both?
 
 ## Coverage Notes
 
@@ -227,6 +285,7 @@ When multiple rsync URLs are provided in one run, `lexonfabric-scale-test` SHALL
   - user clarification in this session: "This tool is just a way to run a local stress test on the LexonFabric parser and produce a block tree. Feel free to name it lexonfabric-scale-test or something along those lines."
   - user clarification in this session selecting block tree/root handoff only rather than MCP config output
   - user clarification in this session: "This could be as simple as a Linux bash script, no need for anything fancy here."
+  - user clarification in this session: "Support both. When running on Linux people can use either. On Windows they use docker compose"
 - **Excluded for now [KNOWN]:**
   - Exact generated file locations and directory layout
   - Specific script flags, shell ergonomics, and Docker Compose command lines

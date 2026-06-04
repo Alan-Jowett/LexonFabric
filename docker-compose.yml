@@ -23,6 +23,27 @@ services:
         "/workspace/examples/local/output/summary.json"
       ]
 
+  scale-test:
+    build:
+      context: .
+      dockerfile: crates/lexonfabric-indexer/Dockerfile.scale-test
+    depends_on:
+      - stapi
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    environment:
+      SCALE_TEST_INDEXER_MODE: direct
+      SCALE_TEST_WAIT_HOST: stapi
+      SCALE_TEST_WAIT_PORT: "8080"
+      SCALE_TEST_WAIT_TIMEOUT_SECS: "60"
+      SCALE_TEST_EMBEDDING_BASE_URL: http://stapi:8080
+    command:
+      [
+        "--sources-file",
+        "/workspace/examples/local/scale-test/rsync.sources.sample.txt"
+      ]
+
   mcp:
     build:
       context: .

@@ -71,13 +71,30 @@ wait_for_tcp_port() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCALE_TEST_COMPOSE_PROJECT_NAME="${SCALE_TEST_COMPOSE_PROJECT_NAME:-lexonfabric}"
+SCALE_TEST_INDEXER_MODE="${SCALE_TEST_INDEXER_MODE:-docker-compose}"
+SCALE_TEST_WAIT_HOST="${SCALE_TEST_WAIT_HOST:-127.0.0.1}"
+SCALE_TEST_WAIT_PORT="${SCALE_TEST_WAIT_PORT:-8080}"
+SCALE_TEST_WAIT_TIMEOUT_SECS="${SCALE_TEST_WAIT_TIMEOUT_SECS:-60}"
+SCALE_TEST_EMBEDDING_BASE_URL="${SCALE_TEST_EMBEDDING_BASE_URL:-http://stapi:8080}"
 
 require_command rsync
-require_command docker
 require_command date
 require_command find
 require_command sort
 require_command sleep
+case "$SCALE_TEST_INDEXER_MODE" in
+  docker-compose)
+    require_command docker
+    ;;
+  direct)
+    require_command lexonfabric-indexer
+    ;;
+  *)
+    printf 'error: unsupported SCALE_TEST_INDEXER_MODE: %s\n' "$SCALE_TEST_INDEXER_MODE" >&2
+    exit 1
+    ;;
+esac
 
 SOURCES_FILE=""
 RUN_NAME=""
@@ -180,7 +197,7 @@ fi
   printf '    "kind": "local",\n'
   printf '    "block_store_root": "block-store",\n'
   printf '    "embedding": {\n'
-  printf '      "base_url": "http://stapi:8080",\n'
+  printf '      "base_url": "%s",\n' "$(json_escape "$SCALE_TEST_EMBEDDING_BASE_URL")"
   printf '      "model": "all-MiniLM-L6-v2",\n'
   printf '      "request_timeout_secs": 30,\n'
   printf '      "max_retries": 10,\n'
@@ -217,9 +234,17 @@ fi
 printf 'Discovered %d mailbox files\n' "${#MAILBOX_PATHS[@]}"
 printf 'Generated request: %s\n' "${REQUEST_PATH#${REPO_ROOT}/}"
 
-(cd "$REPO_ROOT" && docker compose up -d stapi)
-wait_for_tcp_port 127.0.0.1 8080 60
-(cd "$REPO_ROOT" && docker compose run --rm --no-deps indexer run --request "$CONTAINER_REQUEST" --summary-out "$CONTAINER_SUMMARY")
+if [[ "$SCALE_TEST_INDEXER_MODE" == "docker-compose" ]]; then
+  (cd "$REPO_ROOT" && COMPOSE_PROJECT_NAME="$SCALE_TEST_COMPOSE_PROJECT_NAME" docker compose up -d stapi)
+fi
+
+wait_for_tcp_port "$SCALE_TEST_WAIT_HOST" "$SCALE_TEST_WAIT_PORT" "$SCALE_TEST_WAIT_TIMEOUT_SECS"
+
+if [[ "$SCALE_TEST_INDEXER_MODE" == "docker-compose" ]]; then
+  (cd "$REPO_ROOT" && COMPOSE_PROJECT_NAME="$SCALE_TEST_COMPOSE_PROJECT_NAME" docker compose run --rm --no-deps indexer run --request "$CONTAINER_REQUEST" --summary-out "$CONTAINER_SUMMARY")
+else
+  lexonfabric-indexer run --request "$REQUEST_PATH" --summary-out "$SUMMARY_PATH"
+fi
 
 printf 'Summary written to: %s\n' "${SUMMARY_PATH#${REPO_ROOT}/}"
 printf 'Block store written to: %s\n' "${BLOCK_STORE_DIR#${REPO_ROOT}/}"

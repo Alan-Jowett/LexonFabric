@@ -141,9 +141,8 @@ wrapper script that fetches one or more rsync-backed mailbox archives, discovers
 `lexonfabric-indexer` batch to produce a block tree and summary/root handoff
 artifact.
 
-The wrapper is intentionally simple and Linux-oriented. It is designed as a
-local stress-test harness over the existing indexer rather than a new indexer
-subsystem.
+The wrapper is intentionally simple. It is designed as a local stress-test
+harness over the existing indexer rather than a new indexer subsystem.
 
 **Prerequisites**
 
@@ -164,6 +163,24 @@ scripts/lexonfabric-scale-test.sh \
   --sources-file examples/local/scale-test/rsync.sources.sample.txt
 ```
 
+On Linux, you can also launch the same workflow through Docker Compose:
+
+```bash
+docker compose run --rm scale-test
+```
+
+On Windows, use the Docker Compose entrypoint:
+
+```powershell
+docker compose run --rm scale-test
+```
+
+To point the Compose entrypoint at a different sources file in the repository:
+
+```powershell
+docker compose run --rm scale-test --sources-file /workspace/examples/local/scale-test/rsync.sources.sample.txt
+```
+
 Each run writes its generated request, fetched mailbox mirror, block store, and
 summary output under:
 
@@ -179,6 +196,13 @@ To exercise the wrapper end to end against local mailbox fixtures, run:
 
 ```bash
 scripts/lexonfabric-scale-test-smoke.sh
+```
+
+To exercise the Docker Compose entrypoint end to end against local mailbox
+fixtures, run:
+
+```bash
+scripts/lexonfabric-scale-test-compose-smoke.sh
 ```
 
 ## MCP MVP

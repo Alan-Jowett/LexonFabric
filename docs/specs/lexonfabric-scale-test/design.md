@@ -11,7 +11,8 @@ This document specifies the LexonFabric-owned design for realizing
 `lexonfabric-scale-test` as a lightweight local wrapper that fetches mailbox
 archives from rsync, discovers mailbox inputs, generates an indexer-compatible
 request/config artifact, and delegates block-tree generation to existing
-LexonFabric indexing behavior.
+LexonFabric indexing behavior through one shared local workflow with both direct
+shell and Docker Compose entrypoints.
 
 This document is layered on top of:
 
@@ -53,6 +54,7 @@ The `lexonfabric-scale-test` design is intended to be:
 - explicit about ownership boundaries
 - lightweight in first realization
 - executable in the local/testing profile only
+- Windows-friendly through Docker Compose while preserving Linux bash use
 - suitable for large-scale parser stress testing
 - deterministic enough for repeatable local runs
 - extensible to future content-discovery classes
@@ -71,8 +73,14 @@ semantics, block construction, embedding semantics, or MCP-serving semantics.
 
 ### DSG-LST-002 `Minimal operator realization`
 
-The first `lexonfabric-scale-test` realization is a Linux-local operator form
-such as a bash script rather than a dedicated Rust crate or long-lived service.
+The first `lexonfabric-scale-test` realization supports two lightweight local
+entrypoints:
+
+- a direct Linux-local operator form such as a bash script
+- a Docker Compose user entrypoint suitable for Linux or Windows hosts
+
+The realization remains lightweight rather than becoming a dedicated Rust crate
+or long-lived service.
 
 The realization stays intentionally simple so long as it preserves:
 
@@ -81,7 +89,20 @@ The realization stays intentionally simple so long as it preserves:
 - delegated execution of the downstream batch runtime
 - machine-consumable root handoff output
 
-**Traces to:** RQ-SCALE-003A, RQ-SCALE-009A
+**Traces to:** RQ-SCALE-003A, RQ-SCALE-003B, RQ-SCALE-003C, RQ-SCALE-009A,
+RQ-SCALE-009B, RQ-SCALE-009C
+
+### DSG-LST-002A `Compose user entrypoint`
+
+The Docker Compose entrypoint is a first-class user-facing launch mode for
+`lexonfabric-scale-test`, especially for Windows-hosted local development where
+host bash is unavailable.
+
+The Compose entrypoint remains subordinate to the same wrapper-owned workflow
+boundary and may wrap the Linux execution shape inside containers rather than
+requiring Windows-native rsync or bash support on the host.
+
+**Traces to:** RQ-SCALE-003B, RQ-SCALE-003C, RQ-SCALE-003D, RQ-SCALE-009B
 
 ### DSG-LST-003 `Ordered workflow pipeline`
 
@@ -94,9 +115,11 @@ The wrapper realizes one run as a staged pipeline:
 5. capture and publish root handoff output for the resulting block tree
 
 The wrapper remains batch-oriented and does not introduce a long-lived control
-plane.
+plane. The same staged pipeline is preserved regardless of whether the user
+launches it through direct bash or Docker Compose.
 
-**Traces to:** RQ-SCALE-003, RQ-SCALE-004, RQ-SCALE-006, RQ-SCALE-007
+**Traces to:** RQ-SCALE-003, RQ-SCALE-003D, RQ-SCALE-004, RQ-SCALE-006,
+RQ-SCALE-007
 
 ## Input and Artifact Design
 
@@ -126,9 +149,12 @@ rsync-specific input mode.
 
 For repeatable local stress-test runs, the first design baseline expects the
 wrapper to generate mailbox items in a deterministic order when the discovered
-mailbox set is unchanged.
+mailbox set is unchanged. That determinism applies across both user-facing
+entrypoints so the same logical run yields the same request shape and artifact
+family independent of launch mode.
 
-**Traces to:** RQ-SCALE-003, RQ-SCALE-005, RQ-SCALE-010, RQ-SCALE-011
+**Traces to:** RQ-SCALE-003, RQ-SCALE-003D, RQ-SCALE-005, RQ-SCALE-010,
+RQ-SCALE-011
 
 ### DSG-LST-005A `Combined run output model`
 
@@ -179,10 +205,17 @@ Its design remains compatible with the repository's container-oriented local
 profile and may use Docker Compose plus a Linux bash script to coordinate local
 dependencies and runs.
 
+Host operating system does not redefine the wrapper contract:
+
+- Linux hosts may use either the bash or Docker Compose entrypoint
+- Windows hosts use the Docker Compose entrypoint to reach the same Linux-
+  oriented execution shape
+
 The design explicitly does not define the production orchestration shape, which
 remains a separate ARM/Bicep plus Azure Functions concern.
 
-**Traces to:** RQ-SCALE-003, RQ-SCALE-009, RQ-SCALE-009A
+**Traces to:** RQ-SCALE-003, RQ-SCALE-003B, RQ-SCALE-003C, RQ-SCALE-009,
+RQ-SCALE-009A, RQ-SCALE-009B, RQ-SCALE-009C
 
 ### DSG-LST-009 `No MCP-serving responsibilities`
 
@@ -204,7 +237,7 @@ practical rather than inventing a new rsync-specific indexing protocol.
 This design keeps the stress-test harness subordinate to existing boundaries
 and minimizes the surface area that future changes must keep in sync.
 
-**Traces to:** RQ-SCALE-010, RQ-SCALE-013
+**Traces to:** RQ-SCALE-003D, RQ-SCALE-010, RQ-SCALE-013
 
 ### DSG-LST-011 `Future discovery extensibility`
 
@@ -226,15 +259,16 @@ the same wrapper-owned stages.
 LexonFabric-owned verification artifacts validate:
 
 - wrapper-owned rsync acquisition and mailbox discovery behavior
+- equivalent workflow semantics across the bash and Docker Compose entrypoints
 - generated request/config compatibility with the downstream indexer contract
 - delegated execution of the existing parser/indexer path
 - production of a machine-consumable root handoff artifact
-- local-only execution and simple Linux operator realization
+- local-only execution plus the approved Linux and Docker Compose entrypoints
 - absence of MCP-config generation requirements in this increment
 
 LexonFabric-owned verification artifacts do not attempt to revalidate parser,
 indexing, block-store, embedding, or MCP semantics already covered by other
 repository or upstream boundaries.
 
-**Traces to:** RQ-SCALE-003A, RQ-SCALE-007, RQ-SCALE-008, RQ-SCALE-012,
-RQ-SCALE-013
+**Traces to:** RQ-SCALE-003A, RQ-SCALE-003B, RQ-SCALE-003C, RQ-SCALE-003D,
+RQ-SCALE-007, RQ-SCALE-008, RQ-SCALE-012, RQ-SCALE-013

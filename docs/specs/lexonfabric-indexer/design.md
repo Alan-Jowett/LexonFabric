@@ -2,14 +2,17 @@
 
 ## Status
 
-Phase 2 specification patch for the approved email-artifact and chunk-level
-indexing evolution in `docs/specs/lexonfabric-indexer/requirements.md`.
+Phase 2 specification patch for the approved email-artifact, chunk-level
+indexing, and local filesystem block-store interoperability evolution in
+`docs/specs/lexonfabric-indexer/requirements.md`.
 
 ## Scope
 
 This document specifies the LexonFabric-owned design for realizing the approved
 indexer requirements, including the email-ingestion refinement from mailbox
-sources to normalized email artifacts and chunk-level embedding units.
+sources to normalized email artifacts and chunk-level embedding units plus the
+local filesystem block-store interoperability correction for the local/testing
+profile.
 
 This document is layered on top of:
 
@@ -19,6 +22,8 @@ This document is layered on top of:
   `crates/lexongraph-indexer/src/lib.rs`
 - external LexonGraph repository source (not vendored in LexonFabric):
   `crates/lexongraph-block-store/src/lib.rs`
+- external LexonGraph repository source (not vendored in LexonFabric):
+  `crates/lexongraph-block-store-fs/src/lib.rs`
 - external LexonGraph repository source (not vendored in LexonFabric):
   `crates/lexongraph-embeddings-trait/src/lib.rs`
 
@@ -61,6 +66,7 @@ The LexonFabric indexer design is intended to be:
 - minimal and fully executable in the local/testing profile first
 - extensible to future content types
 - compatible with a Linux batch-container runtime
+- interoperable with LexonGraph-owned local block-store tooling
 - chunk-first for email retrieval while preserving full-message and source
   provenance artifacts
 
@@ -266,6 +272,29 @@ configuration target rather than an implemented runtime path in this increment.
 
 **Traces to:** RQ-INDEXER-005, RQ-INDEXER-007, RQ-INDEXER-010
 
+### DSG-LFI-005A `Filesystem block-store interoperability`
+
+For the local/testing profile, LexonFabric realizes the filesystem-backed
+`BlockStore` through the upstream `lexongraph-block-store-fs` crate rather than
+through a repository-local filesystem naming scheme.
+
+This keeps local block publication interoperable with LexonGraph-owned
+filesystem tooling by using the upstream on-disk layout contract, including a
+sharded block path derived from the block hash rather than a flat
+repository-specific filename mapping.
+
+The rest of the LexonFabric indexing flow still consumes only the abstract
+`BlockStore` interface, so this interoperability requirement does not leak
+filesystem path details into content resolution, batch orchestration, or future
+production adapters.
+
+Because the superseded repository-local filesystem layout is not part of the
+approved compatibility boundary for this increment, the local/testing
+realization may require a fresh or rebuilt local store instead of preserving
+reads from the old layout.
+
+**Traces to:** RQ-INDEXER-005, RQ-INDEXER-010B
+
 ### DSG-LFI-006 `Embedding provider adapter boundary`
 
 LexonFabric provides environment-selected implementations or adapters that
@@ -366,6 +395,8 @@ LexonFabric-owned verification artifacts validate:
 - correct delegation to `lexongraph-indexer`
 - correct selection and use of content-resolution, block-store, and
   embedding-provider adapters
+- correct interoperability of the local filesystem-backed block-store profile
+  with LexonGraph-owned tooling expectations
 - correct mailbox retention, normalized email artifact derivation, and chained
   provenance
 - correct shaping of chunk-sized delegated email items
@@ -376,5 +407,5 @@ LexonFabric-owned verification artifacts do not attempt to revalidate
 LexonGraph's own block-store or embedding-trait contracts beyond proving that
 LexonFabric consumes them correctly.
 
-**Traces to:** RQ-INDEXER-008A, RQ-INDEXER-010A, RQ-INDEXER-010,
-DSG-LFI-007A
+**Traces to:** RQ-INDEXER-008A, RQ-INDEXER-010A, RQ-INDEXER-010B,
+RQ-INDEXER-010, DSG-LFI-007A, DSG-LFI-005A

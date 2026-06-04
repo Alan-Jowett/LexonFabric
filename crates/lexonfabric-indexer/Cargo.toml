@@ -11,6 +11,7 @@ clap.workspace = true
 half.workspace = true
 lexongraph-block.workspace = true
 lexongraph-block-store.workspace = true
+lexongraph-block-store-fs.workspace = true
 lexongraph-embeddings-trait.workspace = true
 lexongraph-indexer.workspace = true
 mailparse = "0.16.1"
@@ -21,7 +22,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-lexongraph-block-store = { workspace = true, features = ["conformance"] }
 lexongraph-embeddings-trait = { workspace = true, features = ["conformance"] }
 lexongraph-indexer = { workspace = true, features = ["conformance"] }
 tempfile.workspace = true

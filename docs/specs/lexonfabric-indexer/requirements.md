@@ -4,7 +4,7 @@
 
 - **Phase:** Phase 2 - Specification Changes
 - **Status:** Approved requirements patch being propagated into design and validation
-- **Scope:** LexonFabric indexer integration boundary plus incremental email-artifact and chunk-indexing evolution
+- **Scope:** LexonFabric indexer integration boundary plus incremental email-artifact, chunk-indexing, and local block-store interoperability evolution
 
 ## USER-REQUEST
 
@@ -33,6 +33,9 @@
 - **UR-23 [KNOWN]:** Email provenance should be chainable from indexed chunk to normalized email artifact to source mailbox artifact.
 - **UR-24 [KNOWN]:** The first email chunking baseline may be sentence-aware and implementation-simple, but the indexing design must preserve a seam for future tokenizer-driven or more semantic chunking strategies.
 - **UR-25 [KNOWN]:** Mailbox artifacts should be retained as first-class provenance artifacts so LexonFabric can support re-normalization, re-chunking, and re-ingestion from the original source material.
+- **UR-26 [KNOWN]:** Remove the repository-local `LocalFilesystemBlockStore` and replace it with the LexonGraph `lexongraph-block-store-fs` crate for the local/testing filesystem-backed block-store realization.
+- **UR-27 [KNOWN]:** The current repository-local filesystem store breaks `lexongraph-block-inspect` interoperability because it uses a different on-disk naming scheme than LexonGraph's filesystem block-store tools expect.
+- **UR-28 [KNOWN]:** It is acceptable for this change to require a fresh or rebuilt local block store; continued read compatibility with blocks written by the superseded custom local layout is not required.
 
 ## Change Manifest
 
@@ -49,6 +52,8 @@
 | CM-INDEXER-009 | Add | Require normalized email artifacts to be hash-addressed, retrievable by reference from indexed chunks, and anchored in LexonFabric-owned storage rather than client-side mailbox parsing | UR-16, UR-17, UR-18 |
 | CM-INDEXER-010 | Add | Define email-body normalization, common-case chunk metadata duplication, shared storage abstractions, and chained provenance for email indexing artifacts | UR-20, UR-21, UR-22, UR-23 |
 | CM-INDEXER-011 | Add | Establish a simple sentence-aware email chunking baseline while requiring retained mailbox provenance and future chunking extensibility | UR-24, UR-25 |
+| CM-INDEXER-012 | Revise | Require the local/testing filesystem-backed block-store realization to stay interoperable with LexonGraph filesystem store tooling and naming/layout expectations | UR-26, UR-27 |
+| CM-INDEXER-013 | Add | Explicitly allow the local/testing filesystem store transition to require a fresh or rebuilt local store rather than preserving reads from the superseded custom layout | UR-28 |
 
 ## Before / After
 
@@ -106,6 +111,16 @@
 
 - **Before [KNOWN]:** The requirements did not define whether mailbox provenance retention was mandatory or whether the first email chunking strategy should stay simple while preserving room for more semantic chunking later.
 - **After [KNOWN]:** The requirements make mailbox artifact retention mandatory for reprocessing scenarios and define the first email chunking strategy as a simple sentence-aware baseline that preserves a seam for future tokenizer-driven or more semantic chunking policies.
+
+### BA-INDEXER-012
+
+- **Before [KNOWN]:** The requirements allowed a repository-local filesystem `BlockStore` realization without constraining its on-disk naming or layout to remain interoperable with LexonGraph's filesystem inspection tooling.
+- **After [KNOWN]:** The requirements now bind the local/testing filesystem-backed block-store realization to LexonGraph's filesystem store layout expectations so `lexongraph-block-inspect` and related filesystem tooling can inspect LexonFabric-produced local stores without repository-specific translation.
+
+### BA-INDEXER-013
+
+- **Before [KNOWN]:** The requirements did not state whether the local filesystem block-store transition had to preserve reads from the superseded custom layout.
+- **After [KNOWN]:** The requirements now allow this interoperability fix to require a fresh or rebuilt local store, avoiding a hidden backward-compatibility obligation for the old repository-local layout.
 
 ## Requirements
 
@@ -202,9 +217,12 @@ LexonFabric SHALL provide a concrete implementation of `lexongraph_block_store::
   - local filesystem for local/testing operation
   - Azure Blob Storage for production operation
 - **MVP realization [KNOWN]:** The first in-repo implementation must execute end-to-end against the local filesystem profile. Azure Blob Storage remains a required future profile boundary, but not a required executable realization for the first MVP.
+- **Local filesystem interoperability [KNOWN]:** The local/testing filesystem-backed realization SHALL use the LexonGraph-owned filesystem block-store contract, including its on-disk naming and layout scheme, so LexonGraph filesystem tooling such as `lexongraph-block-inspect` can operate on LexonFabric-produced local stores.
+- **Local implementation target [KNOWN]:** The local/testing filesystem-backed realization SHALL use the upstream `lexongraph-block-store-fs` crate rather than a repository-local filesystem naming scheme.
+- **Migration boundary [KNOWN]:** This local filesystem interoperability correction may require a fresh or rebuilt local store; continued read compatibility with blocks written by the superseded custom local layout is not required in this increment.
 - **Artifact reuse [KNOWN]:** The same environment-selected `BlockStore` abstraction family SHALL also be used for normalized email artifacts and mailbox provenance artifacts, provided indexing contracts and retrieval references remain explicit.
 - **Mailbox retention [KNOWN]:** Mailbox provenance artifacts SHALL be retained so the original source material remains available for re-normalization, re-chunking, and re-ingestion flows.
-- **Traceability:** UR-3, UR-6, UR-9, UR-12, UR-13, UR-18, UR-22, UR-25
+- **Traceability:** UR-3, UR-6, UR-9, UR-12, UR-13, UR-18, UR-22, UR-25, UR-26, UR-27, UR-28
 
 #### RQ-INDEXER-006 - Embedding provider integration
 
@@ -260,6 +278,14 @@ LexonFabric SHALL remain subordinate to the public contracts owned by `lexongrap
 - **Rationale [KNOWN]:** Those semantics are already owned by the upstream LexonGraph crates and specifications.
 - **Traceability:** UR-3, UR-8, UR-9
 
+#### RQ-INDEXER-010B - Local block-store tooling interoperability
+
+For the local/testing filesystem-backed profile, LexonFabric SHALL remain interoperable with LexonGraph-owned filesystem block-store tooling and SHALL NOT publish blocks using a repository-specific local filename or directory scheme under the same `BlockStore` boundary.
+
+- **Rationale [KNOWN]:** Local block inspection and other filesystem-oriented LexonGraph tooling depend on the upstream filesystem block-store layout contract rather than on an arbitrary repository-local naming scheme.
+- **Boundary [KNOWN]:** This requirement constrains only the local/testing filesystem-backed profile and does not redefine Azure Blob layout details for the production profile.
+- **Traceability:** UR-26, UR-27
+
 #### RQ-INDEXER-010 - Stable abstraction boundary
 
 LexonFabric SHALL keep content resolution, block storage, and embedding-provider variation behind stable integration boundaries so future content types and provider swaps do not require redefinition of the core indexing contract.
@@ -289,10 +315,13 @@ LexonFabric SHALL keep content resolution, block storage, and embedding-provider
 | Local development remains self-contained and batch-oriented | Preserved | Docker Compose is constrained to compose local dependencies around the batch container rather than changing the runtime model |
 | Clients are not forced to parse raw mailbox blobs for ordinary retrieval | Preserved | Indexed chunks must reference normalized email artifacts so retrieval can stay at chunk level or expand to full normalized email through repository-owned artifacts |
 | Storage abstraction count stays bounded across environments | Preserved | Requirements now reuse the environment-selected `BlockStore` abstraction family for indexed blocks, normalized email artifacts, and mailbox provenance artifacts rather than introducing a second storage stack |
+| Local filesystem block stores remain interoperable with LexonGraph tooling | Preserved | The local/testing profile is now constrained to LexonGraph's filesystem naming/layout contract so inspection tools can consume repository-produced local stores |
 
 ## Coverage Notes
 
 - **Covered sources [KNOWN]:**
+  - user request in this session: "remove LocalFilesystemBlockStore and replace with the lexongraph-block-store-fs crate from lexongraph. Our custom store is breaking lexongraph-block-inspect because it uses a totally different naming scheme"
+  - user clarification in this session selecting: "Fresh/rebuilt local store is acceptable"
   - `README.md:18-27`
   - `README.md:42-49`
   - `README.md:51-59`
@@ -306,7 +335,13 @@ LexonFabric SHALL keep content resolution, block storage, and embedding-provider
   - external LexonGraph repository source (not vendored in LexonFabric):
     `crates/lexongraph-block-store/src/lib.rs:28-32`
   - external LexonGraph repository source (not vendored in LexonFabric):
+    `crates/lexongraph-block-store-fs/src/lib.rs:89-103`
+  - external LexonGraph repository source (not vendored in LexonFabric):
+    `crates/lexongraph-block-store-fs/src/lib.rs:165-170`
+  - external LexonGraph repository source (not vendored in LexonFabric):
     `crates/lexongraph-embeddings-trait/src/lib.rs:20-33`
+  - `crates/lexonfabric-indexer/src/block_store.rs:11-31`
+  - `crates/lexonfabric-indexer/src/block_store.rs:56-82`
   - user clarification messages in this session specifying both mailbox and document-collection MVP coverage
   - user clarification messages in this session specifying local-only executable MVP scope with production left pluggable
   - user clarification messages in this session specifying Docker Compose-based local dependency orchestration

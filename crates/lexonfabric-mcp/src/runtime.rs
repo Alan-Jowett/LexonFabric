@@ -8,6 +8,7 @@ use lexonfabric_indexer::config::ConfigError as IndexerConfigError;
 use lexonfabric_indexer::embedding::ConfiguredEmbeddingProvider;
 use lexonfabric_indexer::BatchSummary;
 use lexongraph_block::{BlockHash, EmbeddingSpec};
+use lexongraph_block_store::BlockStoreError;
 use lexongraph_embeddings_trait::{EmbeddingInput, EmbeddingProvider};
 use lexongraph_search::{
     DefaultCandidateScorer, DefaultEmbeddingCompatibility, EncodedTargetEmbedding, SearchError,
@@ -121,6 +122,8 @@ pub enum RuntimeError {
     #[error(transparent)]
     Provider(#[from] lexonfabric_indexer::embedding::ConfiguredEmbeddingProviderError),
     #[error(transparent)]
+    BlockStore(#[from] BlockStoreError),
+    #[error(transparent)]
     Search(#[from] SearchError),
 }
 
@@ -172,7 +175,7 @@ impl McpRuntime {
         let embedding_provider =
             ConfiguredEmbeddingProvider::from_environment(&self.config.environment)?;
         let block_store =
-            ConfiguredBlockStore::from_environment(&self.request_dir, &self.config.environment);
+            ConfiguredBlockStore::from_environment(&self.request_dir, &self.config.environment)?;
         let target_embedding = embedding_provider
             .embed(
                 &EmbeddingInput {

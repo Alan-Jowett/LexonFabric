@@ -133,6 +133,78 @@ That stack starts:
 After the batch completes, the summary output is written to
 `examples/local/output/summary.json`.
 
+### Local scale-test workflow
+
+For large local mailbox stress tests, the repository also includes a lightweight
+wrapper script that fetches one or more rsync-backed mailbox archives, discovers
+`.mbox` files, generates an indexer request, and runs the existing
+`lexonfabric-indexer` batch to produce a block tree and summary/root handoff
+artifact.
+
+The wrapper is intentionally simple. It is designed as a local stress-test
+harness over the existing indexer rather than a new indexer subsystem.
+
+**Prerequisites**
+
+- Direct Linux script entrypoint: `rsync` on the host plus Docker with `docker compose`
+- Docker Compose entrypoint on Linux or Windows: Docker with `docker compose`
+
+Run it with one or more rsync URLs:
+
+```bash
+scripts/lexonfabric-scale-test.sh \
+  rsync.ietf.org::mailman-archive/ipsec/
+```
+
+Or from a sources file:
+
+```bash
+scripts/lexonfabric-scale-test.sh \
+  --sources-file examples/local/scale-test/rsync.sources.sample.txt
+```
+
+On Linux, you can also launch the same workflow through Docker Compose:
+
+```bash
+docker compose run --rm scale-test
+```
+
+On Windows, use the Docker Compose entrypoint:
+
+```powershell
+docker compose run --rm scale-test
+```
+
+To point the Compose entrypoint at a different sources file in the repository:
+
+```powershell
+docker compose run --rm scale-test --sources-file /workspace/examples/local/scale-test/rsync.sources.sample.txt
+```
+
+Each run writes its generated request, fetched mailbox mirror, block store, and
+summary output under:
+
+```text
+examples/local/scale-test/runs/<run-id>/
+```
+
+The generated `request.json` is compatible with the existing local indexer
+contract, and `summary.json` contains the resulting `root_id` for the produced
+block tree.
+
+To exercise the wrapper end to end against local mailbox fixtures, run:
+
+```bash
+scripts/lexonfabric-scale-test-smoke.sh
+```
+
+To exercise the Docker Compose entrypoint end to end against local mailbox
+fixtures, run:
+
+```bash
+scripts/lexonfabric-scale-test-compose-smoke.sh
+```
+
 ## MCP MVP
 
 The first `lexonfabric-mcp` MVP is now implemented as a Rust stdio MCP server

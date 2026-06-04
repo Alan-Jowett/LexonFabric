@@ -245,10 +245,7 @@ fn derive_email_core(parsed: &ParsedMail<'_>) -> Option<String> {
 
 fn first_preferred_body(parsed: &ParsedMail<'_>) -> Option<String> {
     if parsed.subparts.is_empty() {
-        return parsed
-            .get_body()
-            .ok()
-            .map(|body| normalize_line_endings(&body));
+        return decoded_body_lossy(parsed).map(|body| normalize_line_endings(&body));
     }
 
     let mut html_body = None;
@@ -264,15 +261,10 @@ fn preferred_leaf_body(parsed: &ParsedMail<'_>, html_body: &mut Option<String>) 
     if parsed.subparts.is_empty() {
         let mimetype = parsed.ctype.mimetype.to_ascii_lowercase();
         if mimetype == "text/plain" {
-            return parsed
-                .get_body()
-                .ok()
-                .map(|body| normalize_line_endings(&body));
+            return decoded_body_lossy(parsed).map(|body| normalize_line_endings(&body));
         }
         if mimetype == "text/html" && html_body.is_none() {
-            *html_body = parsed
-                .get_body()
-                .ok()
+            *html_body = decoded_body_lossy(parsed)
                 .map(|body| strip_html_tags(&normalize_line_endings(&body)));
         }
         return None;
@@ -327,9 +319,9 @@ fn chunk_email_core(body: &str) -> Vec<String> {
     let mut current = String::new();
     for unit in units {
         let candidate_len = if current.is_empty() {
-            unit.len()
+            unit.chars().count()
         } else {
-            current.len() + 1 + unit.len()
+            current.chars().count() + 1 + unit.chars().count()
         };
         if !current.is_empty() && candidate_len > MAX_CHUNK_CHARS {
             chunks.push(current);
@@ -621,6 +613,16 @@ fn strip_html_tags(value: &str) -> String {
         .replace("&gt;", ">")
 }
 
+fn decoded_body_lossy(parsed: &ParsedMail<'_>) -> Option<String> {
+    match parsed.get_body() {
+        Ok(body) => Some(body),
+        Err(_) => parsed
+            .get_body_raw()
+            .ok()
+            .map(|body| String::from_utf8_lossy(&body).into_owned()),
+    }
+}
+
 fn resolve_path(request_dir: &Path, candidate: &Path) -> PathBuf {
     if candidate.is_absolute() {
         candidate.to_path_buf()
@@ -776,6 +778,43 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(matches!(items[0].content_ref, ContentRef::Document { .. }));
         assert!(matches!(items[1].content_ref, ContentRef::Inline { .. }));
+    }
+
+    #[test]
+    fn single_part_messages_fall_back_to_lossy_body_decoding() {
+        let message = [
+            b"Subject: Lossy\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n".as_slice(),
+            &[0x66, 0x80, 0x6f],
+        ]
+        .concat();
+        let parsed = parse_mail(&message).unwrap();
+
+        let body = first_preferred_body(&parsed).unwrap();
+
+        assert_eq!(body, "f\u{fffd}o");
+    }
+
+    #[test]
+    fn multipart_leaf_bodies_fall_back_to_lossy_body_decoding() {
+        let message = [
+            concat!(
+                "Subject: Multipart Lossy\r\n",
+                "Content-Type: multipart/alternative; boundary=\"b\"\r\n",
+                "\r\n",
+                "--b\r\n",
+                "Content-Type: text/plain; charset=utf-8\r\n",
+                "\r\n"
+            )
+            .as_bytes(),
+            &[0x66, 0x80, 0x6f, b'\r', b'\n'],
+            b"--b--\r\n".as_slice(),
+        ]
+        .concat();
+        let parsed = parse_mail(&message).unwrap();
+
+        let body = first_preferred_body(&parsed).unwrap();
+
+        assert_eq!(body, "f\u{fffd}o");
     }
 
     fn metadata_to_text_map(metadata: &Metadata) -> BTreeMap<String, String> {

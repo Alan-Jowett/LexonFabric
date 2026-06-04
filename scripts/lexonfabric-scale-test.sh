@@ -15,7 +15,7 @@ This script:
   1. fetches mailbox content from one or more rsync URLs
   2. discovers .mbox files in the fetched mirrors
   3. generates an indexer request file in the run directory
-  4. runs the existing indexer via docker compose
+  4. runs the existing indexer directly or via docker compose
   5. leaves summary/root handoff output in the run directory
 EOF
 }
@@ -82,6 +82,14 @@ resolve_input_path() {
     printf '%s' "$candidate"
   else
     printf '%s/%s' "$REPO_ROOT" "$candidate"
+  fi
+}
+
+validate_run_name() {
+  local candidate="$1"
+  if [[ ! "$candidate" =~ ^[A-Za-z0-9._-]+$ ]] || [[ "$candidate" == "." ]] || [[ "$candidate" == ".." ]]; then
+    printf 'error: --run-name must contain only letters, numbers, dot, underscore, or hyphen\n' >&2
+    exit 1
   fi
 }
 
@@ -172,6 +180,8 @@ fi
 
 if [[ -z "$RUN_NAME" ]]; then
   RUN_NAME="$(date -u '+%Y%m%dT%H%M%SZ')"
+else
+  validate_run_name "$RUN_NAME"
 fi
 
 RUN_ROOT_REL="examples/local/scale-test/runs/${RUN_NAME}"

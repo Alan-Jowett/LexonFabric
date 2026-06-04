@@ -7,7 +7,7 @@ RUN cargo build --release -p lexonfabric-indexer
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates rsync \
+    && apt-get install -y --no-install-recommends bash ca-certificates coreutils findutils rsync \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

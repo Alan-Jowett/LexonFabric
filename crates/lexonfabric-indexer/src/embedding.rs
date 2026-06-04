@@ -459,6 +459,7 @@ mod tests {
                         Err(error) => panic!("failed to read test request: {error}"),
                     }
                 }
+                stream.set_nonblocking(false).unwrap();
                 requests
                     .lock()
                     .unwrap()

@@ -165,6 +165,6 @@ The workflow SHALL align with the current LexonFabric repository structure and e
   - stop the first workflow at formatting, linting, and tests
   - keep SPDX/header enforcement, hooks, coverage publication, and README badges out of scope
   - keep pull-request path filtering limited to the minimum Rust/docs/workflow surface listed in `RQ-CI-002`
-- **Excluded from this patch [KNOWN]:**
-  - implementation files under `.github/workflows/` because Phase 1 is requirements-only
-  - implementation files outside the semantic package because implementation belongs to later phases
+- **Excluded from this requirements artifact [KNOWN]:**
+  - design and validation material before the Phase 2 specification pass
+  - implementation files before the later implementation phases

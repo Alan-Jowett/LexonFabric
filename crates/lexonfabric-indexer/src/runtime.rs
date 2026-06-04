@@ -519,6 +519,7 @@ mod tests {
                         Err(error) => panic!("failed to read runtime test request: {error}"),
                     }
                 }
+                stream.set_nonblocking(false).unwrap();
                 let body = r#"{"data":[{"embedding":[0.25,0.75]}]}"#;
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

@@ -146,8 +146,8 @@ harness over the existing indexer rather than a new indexer subsystem.
 
 **Prerequisites**
 
-- `rsync` installed on the host
-- Docker with `docker compose`
+- Direct Linux script entrypoint: `rsync` on the host plus Docker with `docker compose`
+- Docker Compose entrypoint on Linux or Windows: Docker with `docker compose`
 
 Run it with one or more rsync URLs:
 

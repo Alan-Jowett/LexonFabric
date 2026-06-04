@@ -5,7 +5,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/lexonfabric-scale-test.sh [--run-name NAME] [--sources-file PATH] RSYNC_URL [RSYNC_URL ...]
+  scripts/lexonfabric-scale-test.sh [--run-name NAME] [--sources-file PATH] [RSYNC_URL ...]
 
 Examples:
   scripts/lexonfabric-scale-test.sh rsync.ietf.org::mailman-archive/ipsec/
@@ -212,7 +212,7 @@ for index in "${!RSYNC_URLS[@]}"; do
 
   mkdir -p "$source_dir"
   printf 'Fetching [%02d/%02d]: %s\n' "$source_num" "${#RSYNC_URLS[@]}" "$source_url"
-  rsync -avz --delete "${source_url%/}/" "${source_dir}/"
+  rsync -avz --delete -- "${source_url%/}/" "${source_dir}/"
 
   while IFS= read -r mailbox_path; do
     rel_to_run="${mailbox_path#${RUN_ROOT}/}"

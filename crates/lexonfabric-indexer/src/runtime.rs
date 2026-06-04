@@ -1,12 +1,10 @@
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 use lexongraph_block::{BlockError, EmbeddingSpec, SerializedBlock, deserialize_block};
 use lexongraph_block_store::BlockStoreError;
 use lexongraph_indexer::{ConstructedBlocks, IndexItem, Indexer, IndexerError};
 use thiserror::Error;
-use tokio::sync::Semaphore;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::block_store::ConfiguredBlockStore;
@@ -211,19 +209,12 @@ async fn build_leaf_blocks_concurrently(
     let concurrency = max_concurrency.max(1).min(items.len());
     let batch_size = items.len().div_ceil(concurrency);
     let batch_count = items.len().div_ceil(batch_size);
-    let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut join_set = JoinSet::new();
     for (batch_index, chunk) in items.chunks(batch_size).enumerate() {
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore closed unexpectedly");
         let indexer = indexer.clone();
         let embedding_spec = embedding_spec.clone();
         let batch_items = chunk.to_vec();
         join_set.spawn(async move {
-            let _permit = permit;
             let constructed = indexer
                 .build_leaf_blocks(&batch_items, embedding_spec)
                 .await?;

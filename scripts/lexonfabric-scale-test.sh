@@ -28,6 +28,13 @@ require_command() {
   fi
 }
 
+require_docker_compose() {
+  if ! docker compose version >/dev/null 2>&1; then
+    printf 'error: docker compose is required but not available in this Docker installation\n' >&2
+    exit 1
+  fi
+}
+
 sanitize_source_name() {
   local raw="$1"
   local sanitized
@@ -69,6 +76,15 @@ wait_for_tcp_port() {
   done
 }
 
+resolve_input_path() {
+  local candidate="$1"
+  if [[ "$candidate" = /* ]]; then
+    printf '%s' "$candidate"
+  else
+    printf '%s/%s' "$REPO_ROOT" "$candidate"
+  fi
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCALE_TEST_COMPOSE_PROJECT_NAME="${SCALE_TEST_COMPOSE_PROJECT_NAME:-lexonfabric}"
@@ -86,6 +102,7 @@ require_command sleep
 case "$SCALE_TEST_INDEXER_MODE" in
   docker-compose)
     require_command docker
+    require_docker_compose
     ;;
   direct)
     require_command lexonfabric-indexer
@@ -129,12 +146,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -n "$SOURCES_FILE" ]]; then
+  RESOLVED_SOURCES_FILE="$(resolve_input_path "$SOURCES_FILE")"
+  if [[ ! -f "$RESOLVED_SOURCES_FILE" ]]; then
+    printf 'error: --sources-file not found: %s\n' "$RESOLVED_SOURCES_FILE" >&2
+    exit 1
+  fi
+  if [[ ! -r "$RESOLVED_SOURCES_FILE" ]]; then
+    printf 'error: --sources-file is not readable: %s\n' "$RESOLVED_SOURCES_FILE" >&2
+    exit 1
+  fi
+
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [[ -z "$line" || "$line" == \#* ]] && continue
     RSYNC_URLS+=("$line")
-  done <"$SOURCES_FILE"
+  done <"$RESOLVED_SOURCES_FILE"
 fi
 
 if [[ ${#RSYNC_URLS[@]} -eq 0 ]]; then
@@ -241,7 +268,7 @@ fi
 wait_for_tcp_port "$SCALE_TEST_WAIT_HOST" "$SCALE_TEST_WAIT_PORT" "$SCALE_TEST_WAIT_TIMEOUT_SECS"
 
 if [[ "$SCALE_TEST_INDEXER_MODE" == "docker-compose" ]]; then
-  (cd "$REPO_ROOT" && COMPOSE_PROJECT_NAME="$SCALE_TEST_COMPOSE_PROJECT_NAME" docker compose run --rm --no-deps indexer run --request "$CONTAINER_REQUEST" --summary-out "$CONTAINER_SUMMARY")
+  (cd "$REPO_ROOT" && COMPOSE_PROJECT_NAME="$SCALE_TEST_COMPOSE_PROJECT_NAME" docker compose run --build --rm --no-deps indexer run --request "$CONTAINER_REQUEST" --summary-out "$CONTAINER_SUMMARY")
 else
   lexonfabric-indexer run --request "$REQUEST_PATH" --summary-out "$SUMMARY_PATH"
 fi

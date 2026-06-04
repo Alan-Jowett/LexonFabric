@@ -230,6 +230,7 @@ fn encode_embedding(
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Instant;
@@ -390,7 +391,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut response_iter = responses.into_iter();
             while Instant::now() < deadline {
@@ -439,7 +442,7 @@ mod tests {
                 stream.flush().unwrap();
             }
         });
-        thread::sleep(Duration::from_millis(25));
+        ready_rx.recv().unwrap();
 
         TestServer {
             base_url: format!("http://{}", address),

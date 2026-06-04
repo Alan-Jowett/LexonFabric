@@ -105,14 +105,14 @@ fn expand_mailbox_item(
         path: path.to_path_buf(),
         source,
     })?;
-    let mailbox_artifact_ref =
-        store_artifact_block(store, path, ARTIFACT_MEDIA_TYPE_MAILBOX, raw_bytes.clone())?;
     let messages = split_mbox_messages(&raw_bytes);
     if messages.is_empty() {
         return Err(MailboxExpansionError::EmptyMailbox {
             path: path.to_path_buf(),
         });
     }
+    let mailbox_artifact_ref =
+        store_artifact_block(store, path, ARTIFACT_MEDIA_TYPE_MAILBOX, raw_bytes)?;
 
     let mut items = Vec::new();
     for (message_index, message) in messages.iter().enumerate() {

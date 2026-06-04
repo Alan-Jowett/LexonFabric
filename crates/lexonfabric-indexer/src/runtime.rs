@@ -170,13 +170,16 @@ mod tests {
         };
 
         let first = run_request(temp.path(), request.clone()).await.unwrap();
+        let stored_block_count_after_first =
+            fs::read_dir(temp.path().join("blocks")).unwrap().count();
         let second = run_request(temp.path(), request).await.unwrap();
+        let stored_block_count_after_second =
+            fs::read_dir(temp.path().join("blocks")).unwrap().count();
 
         assert_eq!(first.root_id, second.root_id);
         assert_eq!(first.block_ids, second.block_ids);
-        let stored_block_count = fs::read_dir(temp.path().join("blocks")).unwrap().count();
-        assert_eq!(stored_block_count, 5);
-        assert!(stored_block_count > first.block_count);
+        assert_eq!(stored_block_count_after_first, stored_block_count_after_second);
+        assert!(stored_block_count_after_second > first.block_count);
         server.join();
     }
 

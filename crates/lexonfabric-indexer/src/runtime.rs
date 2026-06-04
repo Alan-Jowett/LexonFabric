@@ -224,7 +224,9 @@ async fn build_leaf_blocks_concurrently(
         let batch_items = chunk.to_vec();
         join_set.spawn(async move {
             let _permit = permit;
-            let constructed = indexer.build_leaf_blocks(&batch_items, embedding_spec).await?;
+            let constructed = indexer
+                .build_leaf_blocks(&batch_items, embedding_spec)
+                .await?;
             Ok::<(usize, ConstructedBlocks), IndexerError>((batch_index, constructed))
         });
     }
@@ -537,7 +539,9 @@ mod tests {
             ],
         };
 
-        let serial = run_request(temp.path(), base_request.clone()).await.unwrap();
+        let serial = run_request(temp.path(), base_request.clone())
+            .await
+            .unwrap();
         let parallel = run_request(
             temp.path(),
             BatchRequest {
@@ -596,12 +600,17 @@ mod tests {
             block_size_target: 65_536,
             max_concurrency: Some(1),
             items: vec![BatchItemConfig::Mailbox {
-                path: mailbox_path.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                path: mailbox_path
+                    .strip_prefix(temp.path())
+                    .unwrap()
+                    .to_path_buf(),
                 metadata: BTreeMap::new(),
             }],
         };
 
-        let serial = run_request(temp.path(), base_request.clone()).await.unwrap();
+        let serial = run_request(temp.path(), base_request.clone())
+            .await
+            .unwrap();
         let parallel = run_request(
             temp.path(),
             BatchRequest {
@@ -801,7 +810,9 @@ mod tests {
                             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                                 thread::sleep(Duration::from_millis(10));
                             }
-                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                continue;
+                            }
                             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => break,
                             Err(error) => panic!("failed to read runtime test request: {error}"),
                         }

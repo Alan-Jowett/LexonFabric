@@ -693,6 +693,16 @@ mod tests {
         }
     }
 
+    struct InFlightGuard {
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            self.counter.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
     fn request_is_complete(request: &[u8]) -> bool {
         let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
             return false;
@@ -773,6 +783,9 @@ mod tests {
                 thread::spawn(move || {
                     let current =
                         current_in_flight_for_connection.fetch_add(1, Ordering::SeqCst) + 1;
+                    let _in_flight_guard = InFlightGuard {
+                        counter: Arc::clone(&current_in_flight_for_connection),
+                    };
                     loop {
                         let previous_max = max_in_flight_for_connection.load(Ordering::SeqCst);
                         if current <= previous_max {
@@ -829,7 +842,6 @@ mod tests {
                     stream.write_all(response.as_bytes()).unwrap();
                     stream.flush().unwrap();
                     seen_for_connection.fetch_add(1, Ordering::SeqCst);
-                    current_in_flight_for_connection.fetch_sub(1, Ordering::SeqCst);
                 });
             }
         });

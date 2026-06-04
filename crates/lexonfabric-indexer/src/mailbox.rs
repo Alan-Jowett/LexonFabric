@@ -634,8 +634,8 @@ fn resolve_path(request_dir: &Path, candidate: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_store::LocalFilesystemBlockStore;
     use crate::config::{EmbeddingSpecConfig, EnvironmentConfig, LocalEmbeddingConfig};
+    use lexongraph_block_store_fs::FilesystemBlockStore;
 
     #[test]
     fn mailbox_expansion_stores_artifacts_and_emits_chunk_items() {
@@ -655,7 +655,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let store = LocalFilesystemBlockStore::new(dir.path().join("blocks"));
+        let store = FilesystemBlockStore::new(dir.path().join("blocks")).unwrap();
 
         let items = expand_mailbox_item(
             &mailbox_path,
@@ -685,7 +685,7 @@ mod tests {
             }
             other => panic!("expected inline email content, got {other:?}"),
         }
-        assert_eq!(fs::read_dir(dir.path().join("blocks")).unwrap().count(), 2);
+        assert_eq!(count_files_recursively(&dir.path().join("blocks")), 2);
     }
 
     #[test]
@@ -703,12 +703,12 @@ mod tests {
             ),
         )
         .unwrap();
-        let store = LocalFilesystemBlockStore::new(dir.path().join("blocks"));
+        let store = FilesystemBlockStore::new(dir.path().join("blocks")).unwrap();
 
         let first = expand_mailbox_item(&mailbox_path, &BTreeMap::new(), &store).unwrap();
-        let file_count_after_first = fs::read_dir(dir.path().join("blocks")).unwrap().count();
+        let file_count_after_first = count_files_recursively(&dir.path().join("blocks"));
         let second = expand_mailbox_item(&mailbox_path, &BTreeMap::new(), &store).unwrap();
-        let file_count_after_second = fs::read_dir(dir.path().join("blocks")).unwrap().count();
+        let file_count_after_second = count_files_recursively(&dir.path().join("blocks"));
 
         assert_eq!(
             metadata_to_text_map(&first[0].metadata).get("email_artifact_ref"),
@@ -737,7 +737,7 @@ mod tests {
         )
         .unwrap();
         fs::write(&document_path, "LexonFabric docs.\n").unwrap();
-        let store = LocalFilesystemBlockStore::new(dir.path().join("blocks"));
+        let store = FilesystemBlockStore::new(dir.path().join("blocks")).unwrap();
         let request = BatchRequest {
             environment: EnvironmentConfig::Local {
                 block_store_root: PathBuf::from("blocks"),
@@ -825,5 +825,19 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn count_files_recursively(root: &Path) -> usize {
+        fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .map(|path| {
+                if path.is_dir() {
+                    count_files_recursively(&path)
+                } else {
+                    1
+                }
+            })
+            .sum()
     }
 }

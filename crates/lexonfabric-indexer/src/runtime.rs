@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use lexongraph_block_store::BlockStoreError;
 use lexongraph_indexer::{Indexer, IndexerError};
 use thiserror::Error;
 
@@ -30,6 +31,8 @@ pub enum RuntimeError {
     Provider(#[from] ConfiguredEmbeddingProviderError),
     #[error(transparent)]
     Mailbox(#[from] MailboxExpansionError),
+    #[error(transparent)]
+    BlockStore(#[from] BlockStoreError),
     #[error(transparent)]
     Indexer(#[from] IndexerError),
     #[error("failed to write batch summary {path}: {source}")]
@@ -64,7 +67,7 @@ pub async fn run_request(
     request.validate()?;
     request.environment.local_embedding()?;
     let embedding_provider = ConfiguredEmbeddingProvider::from_environment(&request.environment)?;
-    let block_store = ConfiguredBlockStore::from_environment(request_dir, &request.environment);
+    let block_store = ConfiguredBlockStore::from_environment(request_dir, &request.environment)?;
     let items = expand_batch_items(request_dir, &request, &block_store)?;
     let indexer = Indexer::with_defaults(LocalFilesystemContentResolver, embedding_provider);
     let result = indexer
@@ -170,11 +173,9 @@ mod tests {
         };
 
         let first = run_request(temp.path(), request.clone()).await.unwrap();
-        let stored_block_count_after_first =
-            fs::read_dir(temp.path().join("blocks")).unwrap().count();
+        let stored_block_count_after_first = count_files_recursively(&temp.path().join("blocks"));
         let second = run_request(temp.path(), request).await.unwrap();
-        let stored_block_count_after_second =
-            fs::read_dir(temp.path().join("blocks")).unwrap().count();
+        let stored_block_count_after_second = count_files_recursively(&temp.path().join("blocks"));
 
         assert_eq!(first.root_id, second.root_id);
         assert_eq!(first.block_ids, second.block_ids);
@@ -227,6 +228,20 @@ mod tests {
         fn join(self) {
             self.handle.join().unwrap();
         }
+    }
+
+    fn count_files_recursively(root: &Path) -> usize {
+        fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .map(|path| {
+                if path.is_dir() {
+                    count_files_recursively(&path)
+                } else {
+                    1
+                }
+            })
+            .sum()
     }
 
     fn spawn_embedding_server(expected_requests: usize) -> TestServer {

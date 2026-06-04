@@ -2,14 +2,16 @@
 
 ## Status
 
-Phase 2 validation patch for the approved email-artifact and chunk-level
-indexing evolution in `docs/specs/lexonfabric-indexer/requirements.md` and
+Phase 2 validation patch for the approved email-artifact, chunk-level
+indexing, and local filesystem block-store interoperability evolution in
+`docs/specs/lexonfabric-indexer/requirements.md` and
 `docs/specs/lexonfabric-indexer/design.md`.
 
 ## Validation Scope
 
 These validation entries define the expected conformance surface for the
-LexonFabric-owned indexer boundary.
+LexonFabric-owned indexer boundary, including local filesystem block-store
+interoperability in the local/testing profile.
 
 This package validates LexonFabric's batch contract, adapter selection, and
 delegated use of LexonGraph interfaces. It does not redefine validation already
@@ -130,6 +132,21 @@ collection input contract or the delegated indexer contract.
 **Traces to:** RQ-INDEXER-005, RQ-INDEXER-006, RQ-INDEXER-007, DSG-LFI-005,
 DSG-LFI-006, DSG-LFI-007
 
+### VAL-LFI-005A
+
+Inspect a local/testing block store produced by LexonFabric and the
+filesystem-backed block-store adapter selected for that profile.
+
+**Pass condition:** the local/testing profile uses the upstream
+`lexongraph-block-store-fs` realization, publishes blocks using the upstream
+filesystem naming/layout contract rather than a repository-local flat filename
+scheme, and yields a local store that LexonGraph filesystem tooling such as
+`lexongraph-block-inspect` can consume without repository-specific translation.
+Validation may treat the local store as fresh for this increment rather than
+requiring reads from the superseded custom filesystem layout.
+
+**Traces to:** RQ-INDEXER-005, RQ-INDEXER-010B, DSG-LFI-005, DSG-LFI-005A
+
 ### VAL-LFI-006
 
 Inspect the preserved production environment profile boundary.
@@ -176,6 +193,19 @@ LexonGraph contracts.
 `lexongraph-embeddings-trait`, and does not redefine their public semantics.
 
 **Traces to:** RQ-INDEXER-010A, DSG-LFI-001, DSG-LFI-011
+
+### VAL-LFI-009A
+
+Inspect the repository's indexer specification package against LexonGraph's
+filesystem-backed block-store tooling boundary.
+
+**Pass condition:** the package requires LexonFabric to consume the upstream
+filesystem-backed block-store layout contract for local/testing operation
+without redefining that layout behind a repository-local scheme, while leaving
+production storage layout details outside this local-only interoperability
+constraint.
+
+**Traces to:** RQ-INDEXER-010B, DSG-LFI-005A, DSG-LFI-011
 
 ### VAL-LFI-010
 

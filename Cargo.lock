@@ -855,6 +855,7 @@ dependencies = [
  "half",
  "lexongraph-block",
  "lexongraph-block-store",
+ "lexongraph-block-store-fs",
  "lexongraph-embeddings-trait",
  "lexongraph-indexer",
  "mailparse",
@@ -901,6 +902,16 @@ version = "0.1.0"
 source = "git+https://github.com/Alan-Jowett/LexonGraph?rev=2d4e1e2a3ca229f49dde0a1df2db3b308cad0383#2d4e1e2a3ca229f49dde0a1df2db3b308cad0383"
 dependencies = [
  "lexongraph-block",
+]
+
+[[package]]
+name = "lexongraph-block-store-fs"
+version = "0.1.0"
+source = "git+https://github.com/Alan-Jowett/LexonGraph?rev=2d4e1e2a3ca229f49dde0a1df2db3b308cad0383#2d4e1e2a3ca229f49dde0a1df2db3b308cad0383"
+dependencies = [
+ "lexongraph-block",
+ "lexongraph-block-store",
+ "tempfile",
 ]
 
 [[package]]

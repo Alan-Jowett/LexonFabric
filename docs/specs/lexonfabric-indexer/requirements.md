@@ -470,7 +470,7 @@ LexonFabric SHALL keep content resolution, block storage, and embedding-provider
   - user clarification message in this session: "I think they should. We don't really want two azure blob store, s3 store, local filesystem, etc, abstractions."
   - user clarification message in this session: "I think we can chain the provenance. Chunk -> mail block -> mbox."
   - user clarification message in this session: "Can we use the text_splitter crate for now, with the option to use huggingface tokenizer later for semantic chunking? Agree to the rest"
-  - user request in this session: "Processing of blocks (both leaf and node) can occur conccurently within a layer. Only synchronization required is cross layer."
+  - user request in this session: "Processing of blocks (both leaf and node) can occur concurrently within a layer. Only synchronization required is cross layer."
   - user request in this session: "Can we modify the indexer to use up to a admin defined number of cores, with default being 1/2 the number of physical cpus?"
   - user clarification in this session: "Limit concurrency to the leaf layer for now (it is what is doing the expensive embedding generation anyway). Make note that higher layer concurrency is a future work item."
 - **Excluded for now [KNOWN]:**

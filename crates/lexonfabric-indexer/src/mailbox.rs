@@ -82,6 +82,12 @@ struct NormalizedEmailArtifact {
     body: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct MailboxExpansion {
+    pub(crate) items: Vec<IndexItem<ContentRef>>,
+    pub(crate) message_count: usize,
+}
+
 pub fn expand_batch_items(
     request_dir: &Path,
     request: &BatchRequest,
@@ -97,11 +103,11 @@ pub fn expand_batch_items(
     Ok(items)
 }
 
-fn expand_mailbox_item(
+pub(crate) fn expand_mailbox_item_with_stats(
     path: &Path,
     metadata: &BTreeMap<String, String>,
     store: &dyn BlockStore,
-) -> Result<Vec<IndexItem<ContentRef>>, MailboxExpansionError> {
+) -> Result<MailboxExpansion, MailboxExpansionError> {
     validate_mailbox_path(path)?;
     let raw_bytes = fs::read(path).map_err(|source| MailboxExpansionError::ReadMailbox {
         path: path.to_path_buf(),
@@ -153,7 +159,18 @@ fn expand_mailbox_item(
         }
     }
 
-    Ok(items)
+    Ok(MailboxExpansion {
+        items,
+        message_count: messages.len(),
+    })
+}
+
+fn expand_mailbox_item(
+    path: &Path,
+    metadata: &BTreeMap<String, String>,
+    store: &dyn BlockStore,
+) -> Result<Vec<IndexItem<ContentRef>>, MailboxExpansionError> {
+    Ok(expand_mailbox_item_with_stats(path, metadata, store)?.items)
 }
 
 fn validate_mailbox_path(path: &Path) -> Result<(), MailboxExpansionError> {

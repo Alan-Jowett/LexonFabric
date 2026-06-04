@@ -1,14 +1,15 @@
 use std::fs;
 use std::path::Path;
 
+use lexongraph_block::{BlockError, SerializedBlock, deserialize_block};
 use lexongraph_block_store::BlockStoreError;
 use lexongraph_indexer::{Indexer, IndexerError};
 use thiserror::Error;
 
 use crate::block_store::ConfiguredBlockStore;
-use crate::config::{BatchRequest, BatchSummary, ConfigError};
+use crate::config::{BatchItemConfig, BatchRequest, BatchSummary, ConfigError};
 use crate::embedding::{ConfiguredEmbeddingProvider, ConfiguredEmbeddingProviderError};
-use crate::mailbox::{MailboxExpansionError, expand_batch_items};
+use crate::mailbox::{MailboxExpansionError, expand_mailbox_item_with_stats};
 use crate::resolver::LocalFilesystemContentResolver;
 
 #[derive(Debug, Error)]
@@ -33,8 +34,18 @@ pub enum RuntimeError {
     Mailbox(#[from] MailboxExpansionError),
     #[error(transparent)]
     BlockStore(#[from] BlockStoreError),
+    #[error("failed to deserialize staged block {block_id}: {source}")]
+    DeserializeStagedBlock {
+        block_id: String,
+        #[source]
+        source: BlockError,
+    },
+    #[error("staged block hash mismatch: expected {expected}, store returned {actual}")]
+    StagedBlockHashMismatch { expected: String, actual: String },
     #[error(transparent)]
     Indexer(#[from] IndexerError),
+    #[error("delegated indexing produced no blocks")]
+    EmptyDelegatedOutput,
     #[error("failed to write batch summary {path}: {source}")]
     WriteSummary {
         path: String,
@@ -64,30 +75,139 @@ pub async fn run_request(
     request_dir: &Path,
     request: BatchRequest,
 ) -> Result<BatchSummary, RuntimeError> {
+    run_request_with_progress(request_dir, request, |message| eprintln!("{message}")).await
+}
+
+async fn run_request_with_progress<F>(
+    request_dir: &Path,
+    request: BatchRequest,
+    mut progress: F,
+) -> Result<BatchSummary, RuntimeError>
+where
+    F: FnMut(String),
+{
     request.validate()?;
     request.environment.local_embedding()?;
     let embedding_provider = ConfiguredEmbeddingProvider::from_environment(&request.environment)?;
     let block_store = ConfiguredBlockStore::from_environment(request_dir, &request.environment)?;
-    let items = expand_batch_items(request_dir, &request, &block_store)?;
     let indexer = Indexer::with_defaults(LocalFilesystemContentResolver, embedding_provider);
-    let result = indexer
-        .index(
-            &items,
-            request.to_embedding_spec(),
+    let embedding_spec = request.to_embedding_spec();
+    let document_items = request.to_document_index_items(request_dir);
+    let mut staged_blocks = Vec::new();
+    let mut staged_block_ids = Vec::new();
+
+    if !document_items.is_empty() {
+        progress(format!("Indexing {} document item(s)", document_items.len()));
+        let staged = indexer
+            .build_leaf_blocks(&document_items, embedding_spec.clone())
+            .await?;
+        persist_staged_blocks(&staged.blocks, &block_store)?;
+        progress(format!(
+            "Indexed {} document item(s) into {} leaf block(s)",
+            document_items.len(),
+            staged.blocks.len()
+        ));
+        staged_block_ids.extend(staged.block_ids.iter().copied());
+        staged_blocks.extend(staged.blocks);
+    }
+
+    for item in &request.items {
+        if let BatchItemConfig::Mailbox { path, metadata } = item {
+            let resolved = resolve_path(request_dir, path);
+            progress(format!("Processing mailbox {}", resolved.display()));
+            let expansion = expand_mailbox_item_with_stats(&resolved, metadata, &block_store)?;
+            progress(format!(
+                "Processed mailbox {}: {} message(s), {} delegated item(s)",
+                resolved.display(),
+                expansion.message_count,
+                expansion.items.len()
+            ));
+            let staged = indexer
+                .build_leaf_blocks(&expansion.items, embedding_spec.clone())
+                .await?;
+            persist_staged_blocks(&staged.blocks, &block_store)?;
+            progress(format!(
+                "Indexed {} delegated item(s) from mailbox {} into {} leaf block(s)",
+                expansion.items.len(),
+                resolved.display(),
+                staged.blocks.len()
+            ));
+            staged_block_ids.extend(staged.block_ids.iter().copied());
+            staged_blocks.extend(staged.blocks);
+        }
+    }
+
+    let mut current_layer = unique_serialized_blocks_by_hash(&staged_blocks);
+    while current_layer.len() > 1 {
+        let input_count = current_layer.len();
+        let staged = indexer.build_parent_blocks(
+            &current_layer,
+            embedding_spec.clone(),
             request.block_size_target,
-            &block_store,
-        )
-        .await?;
+        )?;
+        persist_staged_blocks(&staged.blocks, &block_store)?;
+        let next_layer = unique_serialized_blocks_by_hash(&staged.blocks);
+        progress(format!(
+            "Indexed {} staged block(s) into {} parent block(s); {} staged block(s) remain",
+            input_count,
+            staged.blocks.len(),
+            next_layer.len()
+        ));
+        staged_block_ids.extend(staged.block_ids.iter().copied());
+        current_layer = next_layer;
+    }
+    let root = current_layer
+        .first()
+        .ok_or(RuntimeError::EmptyDelegatedOutput)?
+        .hash;
+    staged_block_ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    staged_block_ids.dedup_by(|left, right| left.as_bytes() == right.as_bytes());
 
     Ok(BatchSummary {
-        root_id: result.root_id.to_string(),
-        block_count: result.block_ids.len(),
-        block_ids: result
-            .block_ids
+        root_id: root.to_string(),
+        block_count: staged_block_ids.len(),
+        block_ids: staged_block_ids
             .into_iter()
             .map(|block_id| block_id.to_string())
             .collect(),
     })
+}
+
+fn persist_staged_blocks(
+    blocks: &[SerializedBlock],
+    store: &dyn lexongraph_block_store::BlockStore,
+) -> Result<(), RuntimeError> {
+    for block in blocks {
+        let validated = deserialize_block(&block.bytes, &block.hash).map_err(|source| {
+            RuntimeError::DeserializeStagedBlock {
+                block_id: block.hash.to_string(),
+                source,
+            }
+        })?;
+        let persisted = store.put(&validated.block)?;
+        if persisted != block.hash {
+            return Err(RuntimeError::StagedBlockHashMismatch {
+                expected: block.hash.to_string(),
+                actual: persisted.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn unique_serialized_blocks_by_hash(blocks: &[SerializedBlock]) -> Vec<SerializedBlock> {
+    let mut blocks = blocks.to_vec();
+    blocks.sort_by(|left, right| left.hash.as_bytes().cmp(right.hash.as_bytes()));
+    blocks.dedup_by(|left, right| left.hash == right.hash);
+    blocks
+}
+
+fn resolve_path(request_dir: &Path, candidate: &Path) -> std::path::PathBuf {
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        request_dir.join(candidate)
+    }
 }
 
 pub fn write_summary_file(path: &Path, summary: &BatchSummary) -> Result<(), RuntimeError> {
@@ -217,6 +337,72 @@ mod tests {
             error,
             RuntimeError::Config(ConfigError::MissingLocalEmbeddingBaseUrl)
         ));
+    }
+
+    #[tokio::test]
+    async fn run_request_reports_progress_for_mailbox_processing_and_indexing() {
+        let temp = tempdir().unwrap();
+        let mailbox_path = temp.path().join("2026-04.mbox");
+        let document_path = temp.path().join("notes.txt");
+        fs::write(
+            &mailbox_path,
+            b"From user@example.com Sat Jan 01 00:00:00 2026\nSubject: Progress\n\nBody\n",
+        )
+        .unwrap();
+        fs::write(&document_path, b"document body\n").unwrap();
+
+        let server = spawn_embedding_server(2);
+        let request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: server.base_url.clone(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            items: vec![
+                BatchItemConfig::Mailbox {
+                    path: mailbox_path
+                        .strip_prefix(temp.path())
+                        .unwrap()
+                        .to_path_buf(),
+                    metadata: BTreeMap::new(),
+                },
+                BatchItemConfig::Document {
+                    path: document_path
+                        .strip_prefix(temp.path())
+                        .unwrap()
+                        .to_path_buf(),
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+
+        let mut progress = Vec::new();
+        let summary = run_request_with_progress(temp.path(), request, |message| progress.push(message))
+            .await
+            .unwrap();
+
+        assert!(!summary.block_ids.is_empty());
+        assert!(progress.iter().any(|line| line.contains("Indexing 1 document item(s)")));
+        assert!(progress.iter().any(|line| line.contains("Processing mailbox")));
+        assert!(progress.iter().any(|line| line.contains("Processed mailbox")));
+        assert!(progress
+            .iter()
+            .any(|line| line.contains("Indexed 1 delegated item(s) from mailbox")));
+        assert!(progress
+            .iter()
+            .any(|line| line.contains("parent block(s); 1 staged block(s) remain")));
+        server.join();
     }
 
     struct TestServer {

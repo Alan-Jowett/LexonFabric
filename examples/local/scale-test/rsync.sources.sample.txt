@@ -1,0 +1,4 @@
+# One rsync URL per line.
+# The script ignores blank lines and lines starting with '#'.
+
+rsync.ietf.org::mailman-archive/ipsec/

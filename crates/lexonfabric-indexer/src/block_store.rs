@@ -131,6 +131,24 @@ mod tests {
         assert!(matches!(error, BlockStoreError::BackendFailure(_)));
     }
 
+    #[test]
+    fn configured_local_store_delegates_iter_block_ids() {
+        let dir = tempdir().unwrap();
+        let store = ConfiguredBlockStore::Local(
+            FilesystemBlockStore::new(dir.path().join("blocks")).unwrap(),
+        );
+        let block = sample_block();
+        let block_id = store.put(&block).unwrap();
+
+        let block_ids = store
+            .iter_block_ids()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(block_ids, vec![block_id]);
+    }
+
     fn sample_block() -> Block {
         Block::Leaf(LeafBlock {
             version: VERSION_1,

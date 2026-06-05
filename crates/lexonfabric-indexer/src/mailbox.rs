@@ -658,7 +658,9 @@ fn decoded_body_lossy(parsed: &ParsedMail<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{EmbeddingSpecConfig, EnvironmentConfig, ExecutionStage, LocalEmbeddingConfig};
+    use crate::config::{
+        EmbeddingSpecConfig, EnvironmentConfig, ExecutionStage, LocalEmbeddingConfig,
+    };
     use lexongraph_block_store_fs::FilesystemBlockStore;
 
     #[test]

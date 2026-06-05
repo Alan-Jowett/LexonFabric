@@ -120,7 +120,9 @@ pub enum RuntimeError {
     },
     #[error("failed to parse root_id {value}")]
     InvalidRootId { value: String },
-    #[error("index summary {path} was produced by ingestion-only execution and does not contain a searchable root")]
+    #[error(
+        "index summary {path} was produced by ingestion-only execution and does not contain a searchable root"
+    )]
     IngestionOnlySummary { path: String },
     #[error(transparent)]
     Provider(#[from] lexonfabric_indexer::embedding::ConfiguredEmbeddingProviderError),

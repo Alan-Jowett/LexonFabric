@@ -17,8 +17,7 @@ use tokio::task::{JoinError, JoinSet};
 use crate::block_store::ConfiguredBlockStore;
 use crate::config::{BatchItemConfig, BatchRequest, BatchSummary, ConfigError, ExecutionStage};
 use crate::embedding::{
-    AzureOpenAiEmbeddingProviderStub, ConfiguredEmbeddingProvider,
-    ConfiguredEmbeddingProviderError,
+    AzureOpenAiEmbeddingProviderStub, ConfiguredEmbeddingProvider, ConfiguredEmbeddingProviderError,
 };
 use crate::mailbox::{MailboxExpansionError, expand_mailbox_item_with_stats};
 use crate::paths::resolve_path;
@@ -94,7 +93,9 @@ pub enum RuntimeError {
     EmptyDelegatedOutput,
     #[error("the configured block store contains no clustering-eligible blocks")]
     NoClusterableBlocks,
-    #[error("block store iteration returned block id {block_id}, but no block content was available")]
+    #[error(
+        "block store iteration returned block id {block_id}, but no block content was available"
+    )]
     MissingIteratedBlock { block_id: String },
     #[error("failed to serialize iterated block {block_id}: {source}")]
     SerializeIteratedBlock {
@@ -281,9 +282,13 @@ async fn run_ingestion_stage(
                 max_concurrency
             ),
         );
-        let constructed =
-            build_leaf_blocks_concurrently(indexer, &document_items, embedding_spec, max_concurrency)
-                .await?;
+        let constructed = build_leaf_blocks_concurrently(
+            indexer,
+            &document_items,
+            embedding_spec,
+            max_concurrency,
+        )
+        .await?;
         persist_staged_blocks(&constructed.blocks, block_store)?;
         report_progress(
             progress,
@@ -299,7 +304,10 @@ async fn run_ingestion_stage(
     for item in &request.items {
         if let BatchItemConfig::Mailbox { path, metadata } = item {
             let resolved = resolve_path(request_dir, path);
-            report_progress(progress, format!("Processing mailbox {}", resolved.display()));
+            report_progress(
+                progress,
+                format!("Processing mailbox {}", resolved.display()),
+            );
             let expansion = expand_mailbox_item_with_stats(&resolved, metadata, block_store)?;
             report_progress(
                 progress,
@@ -310,9 +318,13 @@ async fn run_ingestion_stage(
                     expansion.items.len()
                 ),
             );
-            let constructed =
-                build_leaf_blocks_concurrently(indexer, &expansion.items, embedding_spec, max_concurrency)
-                    .await?;
+            let constructed = build_leaf_blocks_concurrently(
+                indexer,
+                &expansion.items,
+                embedding_spec,
+                max_concurrency,
+            )
+            .await?;
             persist_staged_blocks(&constructed.blocks, block_store)?;
             report_progress(
                 progress,
@@ -434,11 +446,12 @@ fn serialize_clusterable_block(
         return Ok(None);
     }
 
-    let serialized =
-        serialize_block(&validated.block).map_err(|source| RuntimeError::SerializeIteratedBlock {
+    let serialized = serialize_block(&validated.block).map_err(|source| {
+        RuntimeError::SerializeIteratedBlock {
             block_id: validated.hash.to_string(),
             source,
-        })?;
+        }
+    })?;
     if serialized.hash != validated.hash {
         return Err(RuntimeError::IteratedBlockHashMismatch {
             expected: validated.hash.to_string(),
@@ -883,7 +896,9 @@ mod tests {
         let first = run_request(temp.path(), cluster_only_request.clone())
             .await
             .unwrap();
-        let second = run_request(temp.path(), cluster_only_request).await.unwrap();
+        let second = run_request(temp.path(), cluster_only_request)
+            .await
+            .unwrap();
 
         assert_eq!(first.root_id, seeded.root_id);
         assert_eq!(second.root_id, seeded.root_id);

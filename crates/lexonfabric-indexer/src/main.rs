@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use lexonfabric_indexer::{run_request_file, write_summary_file};
+use lexonfabric_indexer::{ExecutionStage, run_request_file_with_stage, write_summary_file};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "LexonFabric batch indexer MVP")]
@@ -18,6 +18,8 @@ enum Command {
         request: PathBuf,
         #[arg(long)]
         summary_out: Option<PathBuf>,
+        #[arg(long)]
+        stage: Option<ExecutionStage>,
     },
 }
 
@@ -29,8 +31,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Run {
             request,
             summary_out,
+            stage,
         } => {
-            let summary = run_request_file(&request)
+            let summary = run_request_file_with_stage(&request, stage)
                 .await
                 .with_context(|| format!("failed to run request {}", request.display()))?;
             let rendered =
@@ -43,4 +46,28 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_command_parses_stage_override() {
+        let cli = Cli::try_parse_from([
+            "lexonfabric-indexer",
+            "run",
+            "--request",
+            "request.json",
+            "--stage",
+            "clustering-and-block-assembly",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Run { stage, .. } => {
+                assert_eq!(stage, Some(ExecutionStage::ClusteringAndBlockAssembly));
+            }
+        }
+    }
 }

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ciborium::Value;
 use lexonfabric_indexer::BatchSummary;
+use lexonfabric_indexer::INGESTION_ONLY_ROOT_ID_PLACEHOLDER;
 use lexonfabric_indexer::block_store::ConfiguredBlockStore;
 use lexonfabric_indexer::config::ConfigError as IndexerConfigError;
 use lexonfabric_indexer::embedding::ConfiguredEmbeddingProvider;
@@ -119,6 +120,8 @@ pub enum RuntimeError {
     },
     #[error("failed to parse root_id {value}")]
     InvalidRootId { value: String },
+    #[error("index summary {path} was produced by ingestion-only execution and does not contain a searchable root")]
+    IngestionOnlySummary { path: String },
     #[error(transparent)]
     Provider(#[from] lexonfabric_indexer::embedding::ConfiguredEmbeddingProviderError),
     #[error(transparent)]
@@ -249,6 +252,11 @@ impl McpRuntime {
                     path: summary_path.display().to_string(),
                     source,
                 })?;
+            if summary.root_id == INGESTION_ONLY_ROOT_ID_PLACEHOLDER {
+                return Err(RuntimeError::IngestionOnlySummary {
+                    path: summary_path.display().to_string(),
+                });
+            }
             summary.root_id
         };
 
@@ -345,7 +353,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use lexonfabric_indexer::config::{
-        BatchItemConfig, BatchRequest, EmbeddingSpecConfig, EnvironmentConfig, LocalEmbeddingConfig,
+        BatchItemConfig, BatchRequest, EmbeddingSpecConfig, EnvironmentConfig, ExecutionStage,
+        LocalEmbeddingConfig,
     };
     use lexonfabric_indexer::{run_request, write_summary_file};
     use tempfile::tempdir;
@@ -377,6 +386,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: None,
             items: vec![BatchItemConfig::Document {
                 path: document_path
@@ -479,6 +489,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: None,
             items: vec![BatchItemConfig::Mailbox {
                 path: mailbox_path
@@ -623,6 +634,53 @@ mod tests {
         assert!(matches!(
             error,
             RuntimeError::IndexerConfig(IndexerConfigError::MissingLocalEmbeddingBaseUrl)
+        ));
+    }
+
+    #[test]
+    fn ingestion_only_summary_file_is_rejected_explicitly() {
+        let temp = tempdir().unwrap();
+        let summary_path = temp.path().join("summary.json");
+        write_summary_file(
+            &summary_path,
+            &BatchSummary {
+                root_id: lexonfabric_indexer::INGESTION_ONLY_ROOT_ID_PLACEHOLDER.into(),
+                block_ids: vec![],
+                block_count: 0,
+            },
+        )
+        .unwrap();
+
+        let runtime = McpRuntime::new(
+            temp.path().to_path_buf(),
+            McpConfig {
+                environment: EnvironmentConfig::Local {
+                    block_store_root: PathBuf::from("block-store"),
+                    embedding: LocalEmbeddingConfig {
+                        base_url: "http://localhost:8080".into(),
+                        model: "all-MiniLM-L6-v2".into(),
+                        api_key_env: None,
+                        request_timeout_secs: 5,
+                        max_retries: 0,
+                        retry_delay_ms: 1,
+                    },
+                },
+                embedding_spec: EmbeddingSpecConfig {
+                    dims: 2,
+                    encoding: "f32le".into(),
+                },
+                index: IndexConfig::SummaryFile {
+                    path: PathBuf::from("summary.json"),
+                },
+                top_k: 1,
+                traversal_width: 1,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            runtime.resolve_root_id(),
+            Err(RuntimeError::IngestionOnlySummary { .. })
         ));
     }
 

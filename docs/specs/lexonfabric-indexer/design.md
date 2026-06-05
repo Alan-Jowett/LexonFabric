@@ -4,7 +4,8 @@
 
 Phase 2 specification patch for the approved email-artifact, chunk-level
 indexing, local filesystem block-store interoperability, incremental
-delegated indexing, batch-progress observability, and layer-parallel
+delegated indexing, stage-selectable execution, standalone clustering input
+discovery, clustering-status observability, and layer-parallel
 block-construction evolution in
 `docs/specs/lexonfabric-indexer/requirements.md`.
 
@@ -14,8 +15,10 @@ This document specifies the LexonFabric-owned design for realizing the approved
 indexer requirements, including the email-ingestion refinement from `.mail` and
 `.mbox` mailbox sources to normalized email artifacts and chunk-level embedding
 units plus the local filesystem block-store interoperability correction,
-incremental delegated indexing adoption, batch-progress observability, and
-layer-parallel delegated block construction for the local/testing profile.
+incremental delegated indexing adoption, stage-selectable execution,
+standalone clustering input discovery, batch-progress observability,
+clustering-status observability, and layer-parallel delegated block
+construction for the local/testing profile.
 
 This document is layered on top of:
 
@@ -73,7 +76,8 @@ The LexonFabric indexer design is intended to be:
 - incremental-friendly at the delegated indexing boundary
 - layer-parallel within one delegated construction layer
 - bounded by an administrator-controlled concurrency budget
-- observable during long-running mailbox batches
+- stage-selectable at the same batch boundary across CLI and request-file use
+- observable during long-running mailbox batches and clustering work
 - chunk-first for email retrieval while preserving full-message and source
   provenance artifacts
 
@@ -96,15 +100,24 @@ LexonFabric realizes delegated indexing as a staged handoff to
 `lexongraph-indexer`'s incremental construction APIs rather than as a single
 terminal indexing call.
 
-LexonFabric still owns mailbox expansion, artifact storage, and item shaping.
-The delegated indexer still owns block construction semantics, canonical block
-bytes, and branch-shaping behavior.
+That staged handoff is decomposable into two pipeline phases that may run
+consecutively in one invocation or separately under a caller-selected stage:
+
+1. ingestion plus embedding generation for request-supplied items
+2. clustering plus block assembly over clustering-eligible blocks
+
+LexonFabric still owns mailbox expansion, artifact storage, item shaping, and
+stage orchestration. The delegated indexer still owns block construction
+semantics, canonical block bytes, and branch-shaping behavior.
 
 The design permits LexonFabric to persist delegated leaf and parent blocks as
 work becomes available, while leaving final root determination to the upstream
-LexonGraph contract.
+LexonGraph contract. The design also preserves the existing `BatchSummary`
+shape for the approved stage modes rather than introducing a separate
+stage-specific summary schema.
 
-**Traces to:** RQ-INDEXER-003A, RQ-INDEXER-008, RQ-INDEXER-010A
+**Traces to:** RQ-INDEXER-003A, RQ-INDEXER-003D, RQ-INDEXER-008,
+RQ-INDEXER-010A
 
 ### DSG-LFI-001B `Leaf-layer scheduling discipline`
 
@@ -121,7 +134,8 @@ surface.
 
 This preserves the delegated LexonGraph ownership of canonical block bytes,
 parent-child structure, and final root determination while allowing LexonFabric
-to overlap independent leaf work.
+to overlap independent leaf work. This entry governs only batch-local leaf
+scheduling; standalone clustering input discovery is defined separately.
 
 **Traces to:** RQ-INDEXER-003B, RQ-INDEXER-008, RQ-INDEXER-010A
 
@@ -143,10 +157,50 @@ as future work rather than approximated in-repo.
 
 **Traces to:** RQ-INDEXER-003B, RQ-INDEXER-003C, RQ-INDEXER-009
 
+### DSG-LFI-001D `Stage-selectable execution contract`
+
+LexonFabric exposes one stage-selection contract across its CLI and
+`BatchRequest` surfaces.
+
+The approved stage modes are:
+
+- full pipeline
+- ingestion plus embedding generation only
+- clustering plus block assembly only
+
+The selector defaults to the full pipeline when omitted. Any stage that
+includes ingestion continues to consume the request's collection-oriented items.
+A clustering-only invocation may use an empty item collection because its input
+set is discovered from the configured block store rather than from the request
+payload.
+
+The runtime preserves the existing `BatchSummary` shape for each approved stage
+mode so stage selection does not create a second result-schema family.
+
+**Traces to:** RQ-INDEXER-001, RQ-INDEXER-002, RQ-INDEXER-003D
+
+### DSG-LFI-001E `Standalone clustering input discovery`
+
+When the caller selects clustering plus block assembly without a preceding
+ingestion phase in the same invocation, LexonFabric derives its clustering
+candidate set by iterating the configured `BlockStore` through the upstream
+LexonGraph block-iteration API.
+
+LexonFabric treats the upstream iteration contract as the authority for which
+stored blocks are clustering-eligible. Repository-owned artifacts that are not
+surfaced by that upstream clustering-input iteration contract remain outside the
+standalone clustering input set.
+
+Standalone clustering therefore operates over all clustering-eligible blocks
+visible in the configured store at invocation time rather than over a
+repository-local per-run manifest.
+
+**Traces to:** RQ-INDEXER-003E, RQ-INDEXER-010A
+
 ### DSG-LFI-002 `Batch runtime shape`
 
-The indexer runtime is a Linux Docker container that executes one batch over a
-caller-supplied collection of items.
+The indexer runtime is a Linux Docker container that executes one batch under a
+caller-selected stage over a collection-oriented request shape.
 
 At the container boundary, the batch contract is collection-oriented rather than
 backend-specific so the same invocation shape can be reused for mail archives,
@@ -160,28 +214,48 @@ For email, a mailbox item is a source container that LexonFabric expands into
 stored mailbox and normalized email artifacts plus chunk-sized delegated index
 items before invoking `lexongraph-indexer`.
 
-Within that runtime shape, mailbox-driven batches may advance mailbox by
-mailbox through the incremental delegated indexing seam rather than waiting for
-all delegated work to accumulate behind one final indexer call.
+Within that runtime shape, any stage that includes ingestion may advance mailbox
+by mailbox through the incremental delegated indexing seam rather than waiting
+for all delegated work to accumulate behind one final indexer call. A
+clustering-only request may leave the collection empty and instead derive its
+input from the configured block store through the separate standalone
+clustering-discovery seam.
 
-**Traces to:** RQ-INDEXER-001, RQ-INDEXER-002, RQ-INDEXER-003A
+**Traces to:** RQ-INDEXER-001, RQ-INDEXER-002, RQ-INDEXER-003A,
+RQ-INDEXER-003D, RQ-INDEXER-003E
 
 ### DSG-LFI-002A `Batch progress signaling`
 
-The batch runtime emits progress signals on its normal logging/output surface
-as mailbox-driven work advances.
+The batch runtime emits progress signals on its normal logging/output surface as
+the selected indexing stage advances.
 
 The first design baseline reports at least:
 
 - mailbox-processing start or completion boundaries
 - delegated indexing progress after additional chunk items or constructed
   blocks have been advanced
+- clustering or block-assembly progress after upstream callback events indicate
+  that additional clustering work has advanced
 
 This signaling remains part of the short-lived batch runtime and does not
 introduce a separate progress API, control-plane service, or MCP-visible
-surface.
+surface. For a default full-pipeline run, mailbox or delegated-indexing
+progress appears first and clustering-callback progress follows on the same
+runtime-visible stream once clustering begins.
 
 **Traces to:** RQ-INDEXER-001, RQ-INDEXER-008B
+
+### DSG-LFI-002B `Clustering callback signaling`
+
+LexonFabric realizes clustering observability by implementing the upstream
+LexonGraph clustering status-callback trait and translating callback events into
+runtime-visible progress messages.
+
+This keeps clustering visibility on the same batch-log surface already used for
+mailbox and delegated-indexing progress. It does not introduce a separate
+progress transport, metrics backend, or MCP-visible monitoring surface.
+
+**Traces to:** RQ-INDEXER-008B, RQ-INDEXER-010A
 
 ### DSG-LFI-003 `Collection item normalization`
 
@@ -446,10 +520,12 @@ the batch-container runtime shape.
 The administrator-defined concurrency budget is supplied on the same
 batch-request configuration surface as other runtime tuning inputs.
 
-The design adds an optional top-level request field:
+The design adds optional top-level request fields:
 
 - `max_concurrency`: maximum number of same-layer delegated leaf tasks allowed
   in flight at once
+- `stage`: selected execution stage, defaulting to the full pipeline when
+  omitted
 
 If `max_concurrency` is omitted, LexonFabric derives the runtime budget as:
 
@@ -461,24 +537,31 @@ available host-visible CPU-count signal, provided the default remains bounded,
 documented, and never drops below one.
 
 This configuration surface remains environment-neutral: local/testing and the
-preserved production profile use the same request shape and scheduler contract.
-Higher-layer parent construction remains serial at the LexonFabric layer until
-the upstream delegated indexing API exposes a compatible concurrency seam.
+preserved production profile use the same request shape, stage-selection
+contract, and scheduler contract. Higher-layer parent construction remains
+serial at the LexonFabric layer until the upstream delegated indexing API
+exposes a compatible concurrency seam.
 
-**Traces to:** RQ-INDEXER-003C, RQ-INDEXER-007, RQ-INDEXER-010
+**Traces to:** RQ-INDEXER-003C, RQ-INDEXER-003D, RQ-INDEXER-007,
+RQ-INDEXER-010
 
 ### DSG-LFI-008 `Local and production parity boundary`
 
 Local/testing and production environments differ only in adapter realization and
 provider configuration, not in the container's batch contract, the staged email
-artifact model, content item shape, the concurrency-configuration surface, or the delegated
-`lexongraph-indexer` orchestration contract.
+artifact model, content item shape, the stage-selection and concurrency-
+configuration surfaces, or the delegated `lexongraph-indexer` orchestration
+contract.
 
 The MVP realizes this parity boundary by keeping the core orchestration and item
 model environment-neutral even though only the local/testing profile executes in
-the first increment.
+the first increment. Standalone clustering continues to rely on the same
+configured `BlockStore` abstraction and the same upstream block-iteration
+contract across environments rather than introducing a local-only discovery
+mechanism.
 
-**Traces to:** RQ-INDEXER-007, RQ-INDEXER-010
+**Traces to:** RQ-INDEXER-007, RQ-INDEXER-010, RQ-INDEXER-003D,
+RQ-INDEXER-003E
 
 ## Invariant Design
 
@@ -505,8 +588,13 @@ changing the concurrency budget may change throughput, but it does not change
 the logical block set or final root produced for unchanged input under the same
 delegated LexonGraph contract.
 
+For standalone clustering, the comparable invariant is store-snapshot stability:
+repeating the clustering-only stage against the same clustering-eligible block
+set surfaced by the upstream iteration contract is expected to produce the same
+logical clustering result under unchanged upstream semantics.
+
 **Traces to:** RQ-INDEXER-003B, RQ-INDEXER-003C, RQ-INDEXER-008,
-RQ-INDEXER-010A
+RQ-INDEXER-003E, RQ-INDEXER-010A
 
 ## Verification Realization
 
@@ -516,7 +604,10 @@ LexonFabric-owned verification artifacts validate:
 
 - correct delegation to `lexongraph-indexer`
 - correct use of the incremental delegated indexing seam
+- correct stage-selectable execution across CLI and request-file invocation
 - correct leaf-layer concurrency scheduling with cross-layer barriers
+- correct standalone clustering input discovery through the upstream block-
+  iteration contract
 - correct selection and use of content-resolution, block-store, and
   embedding-provider adapters
 - correct interoperability of the local filesystem-backed block-store profile
@@ -524,7 +615,8 @@ LexonFabric-owned verification artifacts validate:
 - correct mailbox retention, normalized email artifact derivation, and chained
   provenance
 - correct shaping of chunk-sized delegated email items
-- correct progress visibility during long-running mailbox batches
+- correct progress visibility during long-running mailbox batches and clustering
+  work, including callback-driven clustering visibility
 - correct application and defaulting of the administrator-defined concurrency
   budget
 - preservation of stable batch contracts across environments
@@ -537,6 +629,7 @@ LexonGraph's own block-store or embedding-trait contracts beyond proving that
 LexonFabric consumes them correctly.
 
 **Traces to:** RQ-INDEXER-003A, RQ-INDEXER-003B, RQ-INDEXER-003C,
-RQ-INDEXER-008A, RQ-INDEXER-008B, RQ-INDEXER-010A, RQ-INDEXER-010B,
-RQ-INDEXER-010, DSG-LFI-001A, DSG-LFI-001B, DSG-LFI-001C, DSG-LFI-002A,
-DSG-LFI-005A, DSG-LFI-007A, DSG-LFI-007B
+RQ-INDEXER-003D, RQ-INDEXER-003E, RQ-INDEXER-008A, RQ-INDEXER-008B,
+RQ-INDEXER-010A, RQ-INDEXER-010B, RQ-INDEXER-010, DSG-LFI-001A,
+DSG-LFI-001B, DSG-LFI-001C, DSG-LFI-001D, DSG-LFI-001E, DSG-LFI-002A,
+DSG-LFI-002B, DSG-LFI-005A, DSG-LFI-007A, DSG-LFI-007B

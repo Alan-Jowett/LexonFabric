@@ -658,7 +658,7 @@ fn decoded_body_lossy(parsed: &ParsedMail<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{EmbeddingSpecConfig, EnvironmentConfig, LocalEmbeddingConfig};
+    use crate::config::{EmbeddingSpecConfig, EnvironmentConfig, ExecutionStage, LocalEmbeddingConfig};
     use lexongraph_block_store_fs::FilesystemBlockStore;
 
     #[test]
@@ -836,6 +836,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: None,
             items: vec![
                 BatchItemConfig::Mailbox {

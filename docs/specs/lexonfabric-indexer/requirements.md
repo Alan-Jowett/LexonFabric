@@ -4,7 +4,7 @@
 
 - **Phase:** Phase 2 - Design and Validation
 - **Status:** Approved requirements patch being propagated into design and validation
-- **Scope:** LexonFabric indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, incremental delegated indexing, batch-progress observability, and layer-parallel block-construction evolution
+- **Scope:** LexonFabric indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, incremental delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-status observability, and layer-parallel block-construction evolution
 
 ## USER-REQUEST
 
@@ -45,6 +45,12 @@
 - **UR-35 [KNOWN]:** LexonFabric should use up to an administrator-defined number of cores for this work, with the default set to one half of the number of physical CPUs.
 - **UR-36 [INFERRED]:** Introducing layer-parallel block processing must preserve the existing indexing contract, including stable logical outputs and search-serving separation.
 - **UR-37 [KNOWN]:** Limit the current implementation scope to leaf-layer concurrency for now because that is where the expensive embedding generation occurs; higher-layer concurrency remains future work.
+- **UR-38 [KNOWN]:** Provide a command-line option to control which indexing stage runs.
+- **UR-39 [KNOWN]:** Allow callers to run only mailbox ingestion plus embedding generation or only clustering and block assembly.
+- **UR-40 [KNOWN]:** Standalone clustering should examine all clustering-eligible blocks currently available in the configured block store by using the new LexonGraph block-iteration API.
+- **UR-41 [KNOWN]:** LexonGraph clustering now exposes a callback trait for status updates, and LexonFabric should implement that callback seam so slow clustering work can be monitored.
+- **UR-42 [KNOWN]:** Stage selection should be exposed on both the CLI and the `BatchRequest` contract rather than being CLI-only.
+- **UR-43 [KNOWN]:** An ingestion-and-embedding-only run should preserve the existing `BatchSummary` contract rather than introducing a stage-specific partial summary shape.
 
 ## Change Manifest
 
@@ -68,6 +74,12 @@
 | CM-INDEXER-016 | Add | Require observable batch-progress logging for mailbox expansion and delegated indexing progress without introducing a new control-plane surface | UR-32, UR-33 |
 | CM-INDEXER-017 | Revise | Allow delegated leaf-block work to proceed concurrently within the same construction layer while preserving cross-layer synchronization and recording higher-layer concurrency as future work | UR-34, UR-36, UR-37 |
 | CM-INDEXER-018 | Add | Require an administrator-defined concurrency budget for layer-parallel block processing, defaulting to one half of detected physical CPUs with a minimum of one core | UR-35 |
+| CM-INDEXER-019 | Add | Introduce stage-selectable execution so callers can run the full pipeline, ingestion plus embedding only, or clustering plus block assembly only | UR-38, UR-39, UR-42 |
+| CM-INDEXER-020 | Revise | Extend the batch entrypoint contract to carry stage selection on both the CLI and `BatchRequest` while preserving the existing `BatchSummary` shape | UR-38, UR-42, UR-43 |
+| CM-INDEXER-021 | Revise | Permit clustering-only requests to use an empty item collection because standalone clustering discovers its input from the configured block store rather than from request-supplied sources | UR-39, UR-40 |
+| CM-INDEXER-022 | Add | Require standalone clustering to iterate all clustering-eligible blocks surfaced by the LexonGraph block-iteration API for the configured block store rather than depending on a prior LexonFabric summary manifest | UR-39, UR-40 |
+| CM-INDEXER-023 | Revise | Extend observable progress requirements to include clustering and block-assembly status updates through the upstream callback seam on the normal runtime progress surface | UR-41 |
+| CM-INDEXER-024 | Add | Keep stage semantics environment-neutral and content-type-neutral so future content types can participate without reshaping the batch contract | UR-39, UR-42 |
 
 ## Before / After
 
@@ -166,6 +178,31 @@
 - **Before [KNOWN]:** The proposed concurrency change treated leaf and higher-layer parent or node block construction as equally in scope for this increment.
 - **After [KNOWN]:** The current increment now narrows executable concurrency to the leaf layer, where embedding work is concentrated, and records higher-layer concurrency as future work rather than an approved implementation obligation.
 
+### BA-INDEXER-020
+
+- **Before [KNOWN]:** The batch runtime always executed one end-to-end indexing path, and the repository requirements did not define a caller-selectable stage boundary on either the CLI or `BatchRequest`.
+- **After [KNOWN]:** The requirements define one stage-selection surface that is available on both the CLI and `BatchRequest`, defaults to the full pipeline when omitted, and preserves the existing `BatchSummary` contract for every approved stage mode.
+
+### BA-INDEXER-021
+
+- **Before [KNOWN]:** The collection-oriented batch contract implicitly required request-supplied items for every run because all index construction began from the current request payload.
+- **After [KNOWN]:** The requirements preserve request-supplied items for any stage that performs ingestion, while permitting a clustering-only run to use an empty item collection because its inputs are discovered from the configured block store.
+
+### BA-INDEXER-022
+
+- **Before [KNOWN]:** Parent and block-assembly work only consumed leaf blocks produced earlier in the same runtime invocation, so the requirements did not define standalone clustering input discovery.
+- **After [KNOWN]:** The requirements define standalone clustering to consume all clustering-eligible blocks surfaced by the LexonGraph block-iteration API for the configured block store without depending on a prior LexonFabric summary manifest.
+
+### BA-INDEXER-023
+
+- **Before [KNOWN]:** Observable progress covered mailbox processing and delegated indexing progress, but the requirements did not define a clustering callback seam or a unified progress stream across full-pipeline runs.
+- **After [KNOWN]:** The requirements define clustering and block-assembly visibility through the upstream clustering status-callback trait and require those events to appear on the same normal runtime progress surface as mailbox and delegated-indexing progress.
+
+### BA-INDEXER-024
+
+- **Before [KNOWN]:** The requirements did not state whether stage selection should remain generic across content types or whether stage-specific runs would require a new result contract.
+- **After [KNOWN]:** The requirements define stage selection in terms of pipeline phases rather than mailbox-specific behavior and preserve the existing `BatchSummary` contract instead of introducing a stage-specific partial schema.
+
 ## Requirements
 
 ### Functional Requirements
@@ -174,8 +211,11 @@
 
 LexonFabric SHALL provide an indexer runtime that executes as a Linux Docker container in batch mode.
 
+- **Stage control [KNOWN]:** The batch entrypoint SHALL accept a caller-selected execution stage on both the CLI surface and the `BatchRequest` contract.
+- **Default [KNOWN]:** When the caller omits stage selection, the runtime SHALL execute the full approved pipeline.
+- **Summary contract [KNOWN]:** The batch entrypoint SHALL preserve the existing `BatchSummary` shape for the approved stage modes rather than introducing a distinct stage-specific summary schema.
 - **Rationale [KNOWN]:** This matches the intended local and production execution shape from `README.md` and the user request.
-- **Traceability:** UR-2, UR-4
+- **Traceability:** UR-2, UR-4, UR-38, UR-42, UR-43
 
 #### RQ-INDEXER-002 - Collection-oriented input
 
@@ -188,8 +228,9 @@ The batch indexer SHALL accept a collection of items to index rather than a sing
 - **Email ingestion refinement [KNOWN]:** A mailbox item remains a valid batch input, but it is an ingestion source rather than the final embedding unit; LexonFabric expands mailbox content into normalized email artifacts and chunk-level index items before delegated embedding.
 - **Mailbox source compatibility [KNOWN]:** In this increment, mailbox batch items may reference source files ending in `.mail` or `.mbox`.
 - **Document scope boundary [KNOWN]:** Document collections remain valid batch inputs in this increment, but this change does not require document chunking to match email handling. Future document-specific chunking and metadata handling must remain possible through the same collection-oriented contract.
+- **Stage-selectable exemption [KNOWN]:** A clustering-and-block-assembly-only run may use an empty item collection because its inputs are discovered from the configured block store rather than from request-supplied sources.
 - **Extensibility [INFERRED]:** The accepted collection model should permit future content types without redefining the external batch contract.
-- **Traceability:** UR-5, UR-11, UR-15, UR-19, UR-29, UR-30
+- **Traceability:** UR-5, UR-11, UR-15, UR-19, UR-29, UR-30, UR-39, UR-40
 
 #### RQ-INDEXER-003 - Delegated indexing engine
 
@@ -203,9 +244,10 @@ LexonFabric SHALL delegate indexing and index creation to the `lexongraph-indexe
 LexonFabric SHALL adopt the incremental indexing APIs exposed by `lexongraph-indexer` when they satisfy the approved batch contract.
 
 - **Required property [KNOWN]:** The delegated indexing flow must be able to hand off indexing work incrementally rather than depending exclusively on a single one-shot indexing call after the entire batch has been expanded.
+- **Stage decomposition [KNOWN]:** The approved incremental flow is decomposable into an ingestion-plus-embedding stage and a clustering-plus-block-assembly stage that may run together or separately without redefining the delegated indexing contract.
 - **Boundary [KNOWN]:** LexonFabric still does not own index-construction semantics; it consumes upstream incremental APIs rather than reimplementing indexing behavior in-repo.
 - **Idempotence constraint [INFERRED]:** Adopting incremental delegated indexing must preserve the existing immutable, hash-addressed rerun expectations for unchanged content.
-- **Traceability:** UR-3, UR-8, UR-31
+- **Traceability:** UR-3, UR-8, UR-31, UR-39
 
 #### RQ-INDEXER-003B - Layer-parallel delegated block processing
 
@@ -244,6 +286,45 @@ layer-parallel block processing.
   block construction depends on future upstream API support and is not required
   in the current increment.
 - **Traceability:** UR-34, UR-35, UR-37
+
+#### RQ-INDEXER-003D - Stage-selectable execution
+
+LexonFabric SHALL expose stage-selectable execution modes that let callers run
+the full approved pipeline, only ingestion plus embedding generation, or only
+clustering plus block assembly.
+
+- **Required surface [KNOWN]:** The same stage selector must be representable on
+  the CLI and on the `BatchRequest` contract.
+- **Default [KNOWN]:** Omitting the stage selector SHALL preserve the existing
+  full-pipeline behavior.
+- **Contract stability [KNOWN]:** Stage selection SHALL preserve the existing
+  `BatchSummary` shape rather than introducing a stage-specific partial summary
+  contract.
+- **Extensibility [INFERRED]:** Stage names should describe generic pipeline
+  phases rather than mailbox-specific behavior so future content types can
+  participate without reshaping the batch contract.
+- **Traceability:** UR-38, UR-39, UR-42, UR-43
+
+#### RQ-INDEXER-003E - Standalone clustering input discovery
+
+When clustering plus block assembly runs without a preceding ingestion stage in
+the same invocation, LexonFabric SHALL derive clustering inputs by iterating
+the configured `BlockStore` through the LexonGraph block-iteration API.
+
+- **Scope [KNOWN]:** Standalone clustering SHALL examine all clustering-eligible
+  blocks surfaced by that upstream iteration contract for the configured block
+  store rather than only blocks associated with a prior request or summary.
+- **Filtering boundary [INFERRED]:** Blocks not surfaced by the upstream
+  clustering-input iteration contract, including repository-owned artifact
+  classes that are not valid clustering inputs, are outside this requirement's
+  input set.
+- **Request-shape implication [KNOWN]:** A clustering-only invocation may use an
+  empty item collection because input discovery occurs from the configured block
+  store rather than from request-supplied sources.
+- **Idempotence implication [INFERRED]:** Repeating the clustering-only stage
+  against an unchanged clustering-eligible block-store snapshot is expected to
+  yield the same logical clustering result under unchanged upstream semantics.
+- **Traceability:** UR-39, UR-40
 
 #### RQ-INDEXER-004 - Content resolution integration
 
@@ -346,6 +427,9 @@ LexonFabric SHALL preserve idempotent rerun behavior for repeated indexing of th
 - **Required property [KNOWN]:** Produced blocks are immutable and identified by hash, so reruns must not create distinct logical outputs for unchanged content.
 - **Email artifact implication [INFERRED]:** Repeated normalization of semantically unchanged email content should resolve to the same normalized email artifact identity and the same derived chunk identities under a stable normalization and chunking policy.
 - **Concurrency implication [INFERRED]:** Same-layer leaf scheduling must not change the logical block set or final root produced for unchanged input relative to the approved delegated indexing contract.
+- **Standalone clustering implication [INFERRED]:** Repeating the clustering-only
+  stage against the same clustering-eligible block-store snapshot must not
+  change the logical clustering result under unchanged upstream semantics.
 - **Traceability:** UR-8, UR-16, UR-36
 
 #### RQ-INDEXER-008A - Local integration composition
@@ -358,12 +442,26 @@ LexonFabric SHALL provide a Docker Compose topology for the local/testing profil
 
 #### RQ-INDEXER-008B - Observable indexing progress
 
-LexonFabric SHALL emit progress logs during batch execution that make forward progress visible while mailbox items are processed and delegated indexing work advances.
+LexonFabric SHALL emit progress logs during batch execution that make forward
+progress visible while mailbox items are processed, delegated indexing work
+advances, and clustering or block assembly advances.
 
-- **Minimum visibility [KNOWN]:** Progress output must include mailbox-processing visibility and indexed-item visibility so operators can tell that work is continuing before the final summary is emitted.
-- **Surface [INFERRED]:** Progress output should be emitted on the normal batch-runtime log stream so local runs, Compose runs, and containerized production-style runs observe the same signal shape.
+- **Minimum visibility [KNOWN]:** Progress output must include mailbox-processing
+  visibility, indexed-item visibility, and clustering or block-assembly
+  visibility so operators can tell that work is continuing before the final
+  summary is emitted.
+- **Surface [KNOWN]:** Progress output should be emitted on the normal
+  batch-runtime log stream so local runs, Compose runs, and containerized
+  production-style runs observe the same signal shape.
+- **Full-pipeline sequencing [INFERRED]:** When the caller selects the default
+  full pipeline, progress remains one unified runtime-visible stream that spans
+  the ingestion plus embedding phase and the clustering plus block-assembly
+  phase in order.
+- **Callback integration [KNOWN]:** LexonFabric SHALL implement the upstream
+  clustering status-callback trait and translate callback events onto the same
+  runtime progress surface used for mailbox and delegated-indexing progress.
 - **Non-goal [KNOWN]:** This requirement does not introduce a separate control-plane, metrics backend, or MCP-surface change.
-- **Traceability:** UR-32, UR-33
+- **Traceability:** UR-32, UR-33, UR-41
 
 ### Boundary and Invariant Requirements
 
@@ -395,7 +493,10 @@ LexonFabric SHALL keep content resolution, block storage, and embedding-provider
 
 - **MVP implication [KNOWN]:** The first MVP may ship only the local/testing realizations, but it must preserve storage and embedding seams so production adapters can be added without changing the batch contract or content-model abstractions.
 - **Email evolution implication [KNOWN]:** Email-specific normalization, artifact storage, and chunk derivation must not preclude future document-specific policies, metadata, or artifact shapes.
-- **Traceability:** UR-3, UR-6, UR-7, UR-13, UR-19, UR-22
+- **Stage-semantics implication [KNOWN]:** Stage selection must be expressed in
+  terms of generic pipeline phases rather than mailbox-specific behavior so
+  future content types can participate without redefining the batch contract.
+- **Traceability:** UR-3, UR-6, UR-7, UR-13, UR-19, UR-22, UR-42
 
 ## Out of Scope
 
@@ -409,17 +510,18 @@ LexonFabric SHALL keep content resolution, block storage, and embedding-provider
 - Broadening mailbox source compatibility beyond the approved `.mail` and `.mbox` extension set in this increment
 - Introducing a dedicated telemetry service, long-lived progress daemon, or MCP-visible progress API for indexing in this increment
 - Requiring higher-layer parent or node block concurrency in the current increment before the upstream delegated indexing surface exposes a compatible implementation seam
+- Introducing a repository-local per-run clustering manifest or a repository-local block-classification scheme outside the upstream LexonGraph block-iteration contract
 
 ## Invariant Impact Assessment
 
 | Invariant | Impact | Assessment |
 |---|---|---|
 | Indexing remains separate from search serving | Preserved | Requirements explicitly constrain scope to indexing-time orchestration and integrations |
-| Environment-specific storage and embedding behavior stays behind stable interfaces | Preserved | MVP scope is narrowed to local/testing execution while production remains preserved behind the same adapter boundaries |
-| Architecture remains extensible to future content types | Preserved | Collection-oriented input still covers both mailbox and document collections while allowing email-specific normalization and future document-specific handling behind the same contract |
-| Idempotence and recoverability stay aligned with underlying immutable block semantics | Preserved | Requirements extend hash-addressed identity expectations to normalized email artifacts without redefining LexonGraph recovery ownership |
+| Environment-specific storage and embedding behavior stays behind stable interfaces | Preserved | Stage selection, block-store iteration, and clustering-status reporting are constrained to the same request and adapter boundaries across local/testing and the preserved production profile |
+| Architecture remains extensible to future content types | Preserved | Collection-oriented input still covers both mailbox and document collections, and stage selection is defined in generic pipeline terms rather than mailbox-specific behavior |
+| Idempotence and recoverability stay aligned with underlying immutable block semantics | Preserved with clarified scope | Requirements extend hash-addressed identity expectations to normalized email artifacts and require clustering-only reruns over the same clustering-eligible block-store snapshot to remain semantically stable under unchanged upstream semantics |
 | Local development remains self-contained and batch-oriented | Preserved | Docker Compose is constrained to compose local dependencies around the batch container rather than changing the runtime model |
-| Long-running batches remain observable without adding a control plane | Preserved | Progress reporting is constrained to the existing batch-runtime log surface for mailbox processing and delegated indexing visibility |
+| Long-running batches remain observable without adding a control plane | Preserved | Progress reporting remains on the existing batch-runtime log surface and now includes clustering callback visibility in addition to mailbox processing and delegated indexing visibility |
 | Clients are not forced to parse raw mailbox blobs for ordinary retrieval | Preserved | Indexed chunks must reference normalized email artifacts so retrieval can stay at chunk level or expand to full normalized email through repository-owned artifacts |
 | Storage abstraction count stays bounded across environments | Preserved | Requirements now reuse the environment-selected `BlockStore` abstraction family for indexed blocks, normalized email artifacts, and mailbox provenance artifacts rather than introducing a second storage stack |
 | Local filesystem block stores remain interoperable with LexonGraph tooling | Preserved | The local/testing profile is now constrained to LexonGraph's filesystem naming/layout contract so inspection tools can consume repository-produced local stores |
@@ -473,8 +575,14 @@ LexonFabric SHALL keep content resolution, block storage, and embedding-provider
   - user request in this session: "Processing of blocks (both leaf and node) can occur concurrently within a layer. Only synchronization required is cross layer."
   - user request in this session: "Can we modify the indexer to use up to a admin defined number of cores, with default being 1/2 the number of physical cpus?"
   - user clarification in this session: "Limit concurrency to the leaf layer for now (it is what is doing the expensive embedding generation anyway). Make note that higher layer concurrency is a future work item."
+  - user request in this session: "provide a command line option to control which stage runs. Allow the caller to run only the mailbox ingestion + embedding generation or to run the clustering and block assembly."
+  - user clarification in this session selecting: "CLI and BatchRequest"
+  - user clarification in this session selecting: "All blocks in the configured block store (Recommended)"
+  - user request in this session: "The LexonGraph now has a block iteration API so that the clustering can then examine the list of blocks and then start doing clustering. In addition, the clustering also has a callback trait for status updates. Implement that as well so we can monitor the clustering (which is a slow step)"
+  - user clarification in this session selecting: "Keep the existing final-root BatchSummary"
 - **Excluded for now [KNOWN]:**
   - Detailed Rust implementation file paths, crate manifests, Docker assets, and test artifacts, because this requirements document captures the semantic contract and leaves implementation realization to downstream design, validation, and code-review artifacts
   - Exact normalized email CBOR schema, exact duplicated chunk metadata list, and the specific chunking library choice, because those belong to downstream design and validation artifacts rather than requirements
   - The precise log-line schema, sink configuration, and per-item verbosity throttling policy for progress output, because those belong to downstream design and validation artifacts rather than requirements
   - The exact configuration surface for the administrator-defined concurrency cap and the exact physical-CPU detection algorithm in containerized or quota-constrained environments, because those belong to downstream design and validation artifacts rather than requirements
+  - The precise block-kind predicate used inside the upstream LexonGraph block-iteration API to determine clustering eligibility, because this requirements document constrains LexonFabric to the upstream iteration contract without redefining LexonGraph-owned block semantics

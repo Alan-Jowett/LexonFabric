@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ciborium::Value;
+use clap::ValueEnum;
 use lexongraph_block::EmbeddingSpec;
 use lexongraph_indexer::{IndexItem, Metadata};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,25 @@ const DEFAULT_MAX_RETRIES: u32 = 5;
 const DEFAULT_RETRY_DELAY_MS: u64 = 1_000;
 const MIN_MAX_CONCURRENCY: usize = 1;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionStage {
+    #[default]
+    FullPipeline,
+    IngestionAndEmbedding,
+    ClusteringAndBlockAssembly,
+}
+
+impl ExecutionStage {
+    pub fn includes_ingestion(self) -> bool {
+        matches!(self, Self::FullPipeline | Self::IngestionAndEmbedding)
+    }
+
+    pub fn includes_clustering(self) -> bool {
+        matches!(self, Self::FullPipeline | Self::ClusteringAndBlockAssembly)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct BatchRequest {
     pub environment: EnvironmentConfig,
@@ -23,7 +43,10 @@ pub struct BatchRequest {
     #[serde(default = "default_block_size_target")]
     pub block_size_target: usize,
     #[serde(default)]
+    pub stage: ExecutionStage,
+    #[serde(default)]
     pub max_concurrency: Option<usize>,
+    #[serde(default)]
     pub items: Vec<BatchItemConfig>,
 }
 
@@ -103,7 +126,7 @@ pub struct BatchSummary {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("batch request must contain at least one item")]
+    #[error("batch request must contain at least one item for the selected stage")]
     EmptyItems,
     #[error("max_concurrency must be at least 1 when specified")]
     InvalidMaxConcurrency,
@@ -113,7 +136,7 @@ pub enum ConfigError {
 
 impl BatchRequest {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.items.is_empty() {
+        if self.stage.includes_ingestion() && self.items.is_empty() {
             return Err(ConfigError::EmptyItems);
         }
         if matches!(self.max_concurrency, Some(0)) {
@@ -267,6 +290,7 @@ fn default_azure_api_version() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn relative_paths_are_resolved_against_request_directory() {
@@ -289,6 +313,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: default_block_size_target(),
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: None,
             items: vec![BatchItemConfig::Document {
                 path: relative_document_path.clone(),
@@ -325,6 +350,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: default_block_size_target(),
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: Some(0),
             items: vec![BatchItemConfig::Document {
                 path: PathBuf::from("docs").join("sample.txt"),
@@ -357,6 +383,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: default_block_size_target(),
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: Some(7),
             items: vec![BatchItemConfig::Document {
                 path: PathBuf::from("docs").join("sample.txt"),
@@ -375,5 +402,86 @@ mod tests {
         assert_eq!(derive_default_max_concurrency(3), 1);
         assert_eq!(derive_default_max_concurrency(4), 2);
         assert_eq!(derive_default_max_concurrency(8), 4);
+    }
+
+    #[test]
+    fn stage_defaults_to_full_pipeline_when_omitted_from_request_json() {
+        let request: BatchRequest = serde_json::from_value(json!({
+            "environment": {
+                "kind": "local",
+                "block_store_root": "blocks",
+                "embedding": {
+                    "base_url": "http://localhost:8080"
+                }
+            },
+            "embedding_spec": {
+                "dims": 384,
+                "encoding": "f32le"
+            },
+            "items": [{
+                "kind": "document",
+                "path": "docs/sample.txt"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(request.stage, ExecutionStage::FullPipeline);
+    }
+
+    #[test]
+    fn clustering_only_stage_allows_empty_items() {
+        let request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: PathBuf::from("blocks"),
+                embedding: LocalEmbeddingConfig {
+                    base_url: String::new(),
+                    model: default_local_model(),
+                    api_key_env: None,
+                    request_timeout_secs: default_request_timeout_secs(),
+                    max_retries: default_max_retries(),
+                    retry_delay_ms: default_retry_delay_ms(),
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 384,
+                encoding: "f32le".into(),
+            },
+            block_size_target: default_block_size_target(),
+            stage: ExecutionStage::ClusteringAndBlockAssembly,
+            max_concurrency: None,
+            items: vec![],
+        };
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn clustering_only_stage_may_reuse_request_items() {
+        let request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: PathBuf::from("blocks"),
+                embedding: LocalEmbeddingConfig {
+                    base_url: "http://localhost:8080".into(),
+                    model: default_local_model(),
+                    api_key_env: None,
+                    request_timeout_secs: default_request_timeout_secs(),
+                    max_retries: default_max_retries(),
+                    retry_delay_ms: default_retry_delay_ms(),
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 384,
+                encoding: "f32le".into(),
+            },
+            block_size_target: default_block_size_target(),
+            stage: ExecutionStage::ClusteringAndBlockAssembly,
+            max_concurrency: None,
+            items: vec![BatchItemConfig::Document {
+                path: PathBuf::from("docs").join("sample.txt"),
+                metadata: BTreeMap::new(),
+            }],
+        };
+
+        assert!(request.validate().is_ok());
     }
 }

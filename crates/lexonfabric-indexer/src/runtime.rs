@@ -1,20 +1,61 @@
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
-use lexongraph_block::{BlockError, EmbeddingSpec, SerializedBlock, deserialize_block};
+use lexongraph_block::{
+    Block, BlockError, BlockHash, EmbeddingSpec, SerializedBlock, deserialize_block,
+    serialize_block,
+};
 use lexongraph_block_store::BlockStoreError;
-use lexongraph_indexer::{ConstructedBlocks, IndexItem, Indexer, IndexerError};
+use lexongraph_indexer::{
+    ConstructedBlocks, IndexItem, Indexer, IndexerError, IndexingPhase, IndexingStatus,
+    IndexingStatusObserver, IndexingStatusState,
+};
 use thiserror::Error;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::block_store::ConfiguredBlockStore;
-use crate::config::{BatchItemConfig, BatchRequest, BatchSummary, ConfigError};
-use crate::embedding::{ConfiguredEmbeddingProvider, ConfiguredEmbeddingProviderError};
+use crate::config::{BatchItemConfig, BatchRequest, BatchSummary, ConfigError, ExecutionStage};
+use crate::embedding::{
+    AzureOpenAiEmbeddingProviderStub, ConfiguredEmbeddingProvider, ConfiguredEmbeddingProviderError,
+};
 use crate::mailbox::{MailboxExpansionError, expand_mailbox_item_with_stats};
 use crate::paths::resolve_path;
 use crate::resolver::{ContentRef, LocalFilesystemContentResolver};
 
 type RuntimeIndexer = Indexer<LocalFilesystemContentResolver, ConfiguredEmbeddingProvider>;
+type ProgressReporter = Arc<dyn Fn(String) + Send + Sync + 'static>;
+
+pub const INGESTION_ONLY_ROOT_ID_PLACEHOLDER: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+#[derive(Debug, Default)]
+struct StagedBlocks {
+    block_ids: Vec<BlockHash>,
+    blocks: Vec<SerializedBlock>,
+}
+
+impl StagedBlocks {
+    fn extend_constructed(&mut self, constructed: &ConstructedBlocks) {
+        self.block_ids.extend(constructed.block_ids.iter().copied());
+        self.blocks.extend(constructed.blocks.iter().cloned());
+    }
+
+    fn into_summary(self, root_id: String) -> BatchSummary {
+        let mut block_ids = self
+            .block_ids
+            .into_iter()
+            .map(|block_id| block_id.to_string())
+            .collect::<Vec<_>>();
+        block_ids.sort();
+        block_ids.dedup();
+        BatchSummary {
+            root_id,
+            block_count: block_ids.len(),
+            block_ids,
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -50,6 +91,20 @@ pub enum RuntimeError {
     Indexer(#[from] IndexerError),
     #[error("delegated indexing produced no blocks")]
     EmptyDelegatedOutput,
+    #[error("the configured block store contains no clustering-eligible blocks")]
+    NoClusterableBlocks,
+    #[error(
+        "block store iteration returned block id {block_id}, but no block content was available"
+    )]
+    MissingIteratedBlock { block_id: String },
+    #[error("failed to serialize iterated block {block_id}: {source}")]
+    SerializeIteratedBlock {
+        block_id: String,
+        #[source]
+        source: BlockError,
+    },
+    #[error("iterated block hash mismatch: expected {expected}, rebuilt block produced {actual}")]
+    IteratedBlockHashMismatch { expected: String, actual: String },
     #[error("leaf-indexing worker task failed: {0}")]
     LeafTaskJoin(#[from] JoinError),
     #[error("failed to write batch summary {path}: {source}")]
@@ -63,15 +118,25 @@ pub enum RuntimeError {
 }
 
 pub async fn run_request_file(request_path: &Path) -> Result<BatchSummary, RuntimeError> {
+    run_request_file_with_stage(request_path, None).await
+}
+
+pub async fn run_request_file_with_stage(
+    request_path: &Path,
+    stage_override: Option<ExecutionStage>,
+) -> Result<BatchSummary, RuntimeError> {
     let bytes = fs::read(request_path).map_err(|source| RuntimeError::ReadRequest {
         path: request_path.display().to_string(),
         source,
     })?;
-    let request: BatchRequest =
+    let mut request: BatchRequest =
         serde_json::from_slice(&bytes).map_err(|source| RuntimeError::ParseRequest {
             path: request_path.display().to_string(),
             source,
         })?;
+    if let Some(stage) = stage_override {
+        request.stage = stage;
+    }
     let request_dir = request_path.parent().unwrap_or_else(|| Path::new("."));
 
     run_request(request_dir, request).await
@@ -87,110 +152,53 @@ pub async fn run_request(
 async fn run_request_with_progress<F>(
     request_dir: &Path,
     request: BatchRequest,
-    mut progress: F,
+    progress: F,
 ) -> Result<BatchSummary, RuntimeError>
 where
-    F: FnMut(String),
+    F: Fn(String) + Send + Sync + 'static,
 {
+    let progress: ProgressReporter = Arc::new(progress);
     request.validate()?;
-    request.environment.local_embedding()?;
-    let embedding_provider = ConfiguredEmbeddingProvider::from_environment(&request.environment)?;
+    let stage = request.stage;
+    let embedding_provider = configured_embedding_provider_for_stage(stage, &request)?;
     let block_store = ConfiguredBlockStore::from_environment(request_dir, &request.environment)?;
     let indexer = Indexer::with_defaults(LocalFilesystemContentResolver, embedding_provider);
     let embedding_spec = request.to_embedding_spec();
     let max_concurrency = request.effective_max_concurrency();
-    let document_items = request.to_document_index_items(request_dir);
-    let mut staged_blocks = Vec::new();
-    let mut staged_block_ids = Vec::new();
-
-    if !document_items.is_empty() {
-        progress(format!(
-            "Indexing {} document item(s) with up to {} concurrent leaf worker(s)",
-            document_items.len(),
-            max_concurrency
-        ));
-        let staged = build_leaf_blocks_concurrently(
+    let staged = if stage.includes_ingestion() {
+        run_ingestion_stage(
             &indexer,
-            &document_items,
+            request_dir,
+            &request,
+            &block_store,
             &embedding_spec,
             max_concurrency,
+            &progress,
         )
-        .await?;
-        persist_staged_blocks(&staged.blocks, &block_store)?;
-        progress(format!(
-            "Indexed {} document item(s) into {} leaf block(s)",
-            document_items.len(),
-            staged.blocks.len()
-        ));
-        staged_block_ids.extend(staged.block_ids.iter().copied());
-        staged_blocks.extend(staged.blocks);
+        .await?
+    } else {
+        load_clusterable_blocks(&block_store, &embedding_spec, &progress)?
+    };
+
+    if !stage.includes_clustering() {
+        report_progress(
+            &progress,
+            format!(
+                "Skipped clustering and block assembly; returning placeholder root_id {}",
+                placeholder_root_id()
+            ),
+        );
+        return Ok(staged.into_summary(placeholder_root_id()));
     }
 
-    for item in &request.items {
-        if let BatchItemConfig::Mailbox { path, metadata } = item {
-            let resolved = resolve_path(request_dir, path);
-            progress(format!("Processing mailbox {}", resolved.display()));
-            let expansion = expand_mailbox_item_with_stats(&resolved, metadata, &block_store)?;
-            progress(format!(
-                "Processed mailbox {}: {} message(s), {} delegated item(s)",
-                resolved.display(),
-                expansion.message_count,
-                expansion.items.len()
-            ));
-            let staged = build_leaf_blocks_concurrently(
-                &indexer,
-                &expansion.items,
-                &embedding_spec,
-                max_concurrency,
-            )
-            .await?;
-            persist_staged_blocks(&staged.blocks, &block_store)?;
-            progress(format!(
-                "Indexed {} delegated item(s) from mailbox {} into {} leaf block(s)",
-                expansion.items.len(),
-                resolved.display(),
-                staged.blocks.len()
-            ));
-            staged_block_ids.extend(staged.block_ids.iter().copied());
-            staged_blocks.extend(staged.blocks);
-        }
-    }
-
-    let mut current_layer = unique_serialized_blocks_by_hash(staged_blocks);
-    while current_layer.len() > 1 {
-        let input_count = current_layer.len();
-        let staged = indexer.build_parent_blocks(
-            &current_layer,
-            embedding_spec.clone(),
-            request.block_size_target,
-        )?;
-        persist_staged_blocks(&staged.blocks, &block_store)?;
-        let blocks_produced = staged.blocks.len();
-        let next_layer = unique_serialized_blocks_by_hash(staged.blocks);
-        progress(format!(
-            "Indexed {} staged block(s) into {} parent block(s); {} staged block(s) remain",
-            input_count,
-            blocks_produced,
-            next_layer.len()
-        ));
-        staged_block_ids.extend(staged.block_ids.iter().copied());
-        current_layer = next_layer;
-    }
-    let root = current_layer
-        .first()
-        .ok_or(RuntimeError::EmptyDelegatedOutput)?
-        .hash;
-    staged_block_ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    staged_block_ids.dedup_by(|left, right| left.as_bytes() == right.as_bytes());
-
-    Ok(BatchSummary {
-        root_id: root.to_string(),
-        block_count: staged_block_ids.len(),
-        block_ids: staged_block_ids
-            .into_iter()
-            .map(|block_id| block_id.to_string())
-            .collect(),
-    })
+    run_clustering_stage(
+        &indexer,
+        staged,
+        &block_store,
+        &embedding_spec,
+        request.block_size_target,
+        &progress,
+    )
 }
 
 async fn build_leaf_blocks_concurrently(
@@ -236,6 +244,278 @@ async fn build_leaf_blocks_concurrently(
     }
 
     Ok(ConstructedBlocks { block_ids, blocks })
+}
+
+fn configured_embedding_provider_for_stage(
+    stage: ExecutionStage,
+    request: &BatchRequest,
+) -> Result<ConfiguredEmbeddingProvider, RuntimeError> {
+    if stage.includes_ingestion() {
+        request.environment.local_embedding()?;
+        return ConfiguredEmbeddingProvider::from_environment(&request.environment)
+            .map_err(RuntimeError::from);
+    }
+
+    Ok(ConfiguredEmbeddingProvider::AzureOpenAi(
+        AzureOpenAiEmbeddingProviderStub,
+    ))
+}
+
+async fn run_ingestion_stage(
+    indexer: &RuntimeIndexer,
+    request_dir: &Path,
+    request: &BatchRequest,
+    block_store: &dyn lexongraph_block_store::BlockStore,
+    embedding_spec: &EmbeddingSpec,
+    max_concurrency: usize,
+    progress: &ProgressReporter,
+) -> Result<StagedBlocks, RuntimeError> {
+    let document_items = request.to_document_index_items(request_dir);
+    let mut staged = StagedBlocks::default();
+
+    if !document_items.is_empty() {
+        report_progress(
+            progress,
+            format!(
+                "Indexing {} document item(s) with up to {} concurrent leaf worker(s)",
+                document_items.len(),
+                max_concurrency
+            ),
+        );
+        let constructed = build_leaf_blocks_concurrently(
+            indexer,
+            &document_items,
+            embedding_spec,
+            max_concurrency,
+        )
+        .await?;
+        persist_staged_blocks(&constructed.blocks, block_store)?;
+        report_progress(
+            progress,
+            format!(
+                "Indexed {} document item(s) into {} leaf block(s)",
+                document_items.len(),
+                constructed.blocks.len()
+            ),
+        );
+        staged.extend_constructed(&constructed);
+    }
+
+    for item in &request.items {
+        if let BatchItemConfig::Mailbox { path, metadata } = item {
+            let resolved = resolve_path(request_dir, path);
+            report_progress(
+                progress,
+                format!("Processing mailbox {}", resolved.display()),
+            );
+            let expansion = expand_mailbox_item_with_stats(&resolved, metadata, block_store)?;
+            report_progress(
+                progress,
+                format!(
+                    "Processed mailbox {}: {} message(s), {} delegated item(s)",
+                    resolved.display(),
+                    expansion.message_count,
+                    expansion.items.len()
+                ),
+            );
+            let constructed = build_leaf_blocks_concurrently(
+                indexer,
+                &expansion.items,
+                embedding_spec,
+                max_concurrency,
+            )
+            .await?;
+            persist_staged_blocks(&constructed.blocks, block_store)?;
+            report_progress(
+                progress,
+                format!(
+                    "Indexed {} delegated item(s) from mailbox {} into {} leaf block(s)",
+                    expansion.items.len(),
+                    resolved.display(),
+                    constructed.blocks.len()
+                ),
+            );
+            staged.extend_constructed(&constructed);
+        }
+    }
+
+    Ok(staged)
+}
+
+fn run_clustering_stage(
+    indexer: &RuntimeIndexer,
+    mut staged: StagedBlocks,
+    block_store: &dyn lexongraph_block_store::BlockStore,
+    embedding_spec: &EmbeddingSpec,
+    block_size_target: usize,
+    progress: &ProgressReporter,
+) -> Result<BatchSummary, RuntimeError> {
+    let observer = Some(make_status_observer(Arc::clone(progress)));
+    let mut current_layer = unique_serialized_blocks_by_hash(std::mem::take(&mut staged.blocks));
+    let mut layer_index = 0;
+
+    if current_layer.is_empty() {
+        return Err(RuntimeError::EmptyDelegatedOutput);
+    }
+
+    while current_layer.len() > 1 {
+        let input_count = current_layer.len();
+        let constructed = indexer.build_parent_blocks_with_observer(
+            &current_layer,
+            embedding_spec.clone(),
+            block_size_target,
+            layer_index,
+            observer.clone(),
+        )?;
+        persist_staged_blocks(&constructed.blocks, block_store)?;
+        let blocks_produced = constructed.blocks.len();
+        let next_layer = unique_serialized_blocks_by_hash(constructed.blocks.clone());
+        report_progress(
+            progress,
+            format!(
+                "Indexed {} staged block(s) into {} parent block(s); {} staged block(s) remain",
+                input_count,
+                blocks_produced,
+                next_layer.len()
+            ),
+        );
+        staged.extend_constructed(&constructed);
+        current_layer = next_layer;
+        layer_index += 1;
+    }
+
+    let root = current_layer
+        .first()
+        .ok_or(RuntimeError::EmptyDelegatedOutput)?
+        .hash;
+    Ok(staged.into_summary(root.to_string()))
+}
+
+fn load_clusterable_blocks(
+    store: &dyn lexongraph_block_store::BlockStore,
+    embedding_spec: &EmbeddingSpec,
+    progress: &ProgressReporter,
+) -> Result<StagedBlocks, RuntimeError> {
+    report_progress(
+        progress,
+        "Scanning the configured block store for clustering-eligible leaf blocks".to_string(),
+    );
+
+    let mut staged = StagedBlocks::default();
+    for block_id in store.iter_block_ids()? {
+        let block_id = block_id?;
+        let Some(validated) = store.get(&block_id)? else {
+            return Err(RuntimeError::MissingIteratedBlock {
+                block_id: block_id.to_string(),
+            });
+        };
+        let Some(serialized) = serialize_clusterable_block(&validated, embedding_spec)? else {
+            continue;
+        };
+        staged.block_ids.push(validated.hash);
+        staged.blocks.push(serialized);
+    }
+
+    if staged.blocks.is_empty() {
+        return Err(RuntimeError::NoClusterableBlocks);
+    }
+
+    report_progress(
+        progress,
+        format!(
+            "Loaded {} clustering-eligible leaf block(s) from the configured block store",
+            staged.blocks.len()
+        ),
+    );
+    Ok(staged)
+}
+
+fn serialize_clusterable_block(
+    validated: &lexongraph_block::ValidatedBlock,
+    embedding_spec: &EmbeddingSpec,
+) -> Result<Option<SerializedBlock>, RuntimeError> {
+    let Block::Leaf(block) = &validated.block else {
+        return Ok(None);
+    };
+    if block.level != 0
+        || block.embedding_spec != *embedding_spec
+        || block.embedding_spec.dims == 0
+        || block.entries.len() != 1
+        || block.entries[0].embedding.is_empty()
+    {
+        return Ok(None);
+    }
+
+    let serialized = serialize_block(&validated.block).map_err(|source| {
+        RuntimeError::SerializeIteratedBlock {
+            block_id: validated.hash.to_string(),
+            source,
+        }
+    })?;
+    if serialized.hash != validated.hash {
+        return Err(RuntimeError::IteratedBlockHashMismatch {
+            expected: validated.hash.to_string(),
+            actual: serialized.hash.to_string(),
+        });
+    }
+    Ok(Some(serialized))
+}
+
+fn make_status_observer(progress: ProgressReporter) -> IndexingStatusObserver {
+    Arc::new(move |status| {
+        report_progress(&progress, format_indexing_status(status));
+    })
+}
+
+fn format_indexing_status(status: IndexingStatus) -> String {
+    let elapsed_ms = status.elapsed.as_millis();
+    match (status.phase, status.state) {
+        (IndexingPhase::ParentLayerClustering, IndexingStatusState::Started) => format!(
+            "Clustering layer {} started for {} child block(s)",
+            status.layer_index, status.child_count
+        ),
+        (IndexingPhase::ParentLayerClustering, IndexingStatusState::InProgress) => format!(
+            "Clustering layer {} still running after {} ms for {} child block(s)",
+            status.layer_index, elapsed_ms, status.child_count
+        ),
+        (IndexingPhase::ParentLayerClustering, IndexingStatusState::Completed) => format!(
+            "Clustering layer {} completed in {} ms: {} output group(s)",
+            status.layer_index,
+            elapsed_ms,
+            status.output_count.unwrap_or_default()
+        ),
+        (IndexingPhase::ParentLayerClustering, IndexingStatusState::Failed) => format!(
+            "Clustering layer {} failed after {} ms: {}",
+            status.layer_index,
+            elapsed_ms,
+            status.error.unwrap_or_else(|| "unknown error".into())
+        ),
+        (IndexingPhase::ParentLayerMaterialization, IndexingStatusState::Completed) => format!(
+            "Materialized parent layer {} in {} ms: {} block(s)",
+            status.layer_index,
+            elapsed_ms,
+            status.output_count.unwrap_or_default()
+        ),
+        (IndexingPhase::ParentLayerMaterialization, IndexingStatusState::Failed) => format!(
+            "Materializing parent layer {} failed after {} ms: {}",
+            status.layer_index,
+            elapsed_ms,
+            status.error.unwrap_or_else(|| "unknown error".into())
+        ),
+        (IndexingPhase::ParentLayerMaterialization, IndexingStatusState::Started)
+        | (IndexingPhase::ParentLayerMaterialization, IndexingStatusState::InProgress) => format!(
+            "Materializing parent layer {} after {} ms",
+            status.layer_index, elapsed_ms
+        ),
+    }
+}
+
+fn report_progress(progress: &ProgressReporter, message: String) {
+    progress.as_ref()(message);
+}
+
+fn placeholder_root_id() -> String {
+    INGESTION_ONLY_ROOT_ID_PLACEHOLDER.to_string()
 }
 
 fn persist_staged_blocks(
@@ -293,10 +573,12 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use serde_json::json;
     use tempfile::tempdir;
 
     use crate::config::{
-        BatchItemConfig, EmbeddingSpecConfig, EnvironmentConfig, LocalEmbeddingConfig,
+        BatchItemConfig, EmbeddingSpecConfig, EnvironmentConfig, ExecutionStage,
+        LocalEmbeddingConfig,
     };
 
     use super::*;
@@ -331,6 +613,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: None,
             items: vec![
                 BatchItemConfig::Mailbox {
@@ -384,6 +667,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: None,
             items: vec![BatchItemConfig::Document {
                 path: Path::new("doc.txt").to_path_buf(),
@@ -431,6 +715,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: None,
             items: vec![
                 BatchItemConfig::Mailbox {
@@ -450,11 +735,14 @@ mod tests {
             ],
         };
 
-        let mut progress = Vec::new();
-        let summary =
-            run_request_with_progress(temp.path(), request, |message| progress.push(message))
-                .await
-                .unwrap();
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_capture = Arc::clone(&progress);
+        let summary = run_request_with_progress(temp.path(), request, move |message| {
+            progress_capture.lock().unwrap().push(message);
+        })
+        .await
+        .unwrap();
+        let progress = progress.lock().unwrap();
 
         assert!(!summary.block_ids.is_empty());
         assert!(
@@ -480,8 +768,231 @@ mod tests {
         assert!(
             progress
                 .iter()
+                .any(|line| line.contains("Clustering layer 0 started"))
+        );
+        assert!(
+            progress
+                .iter()
+                .any(|line| line.contains("Materialized parent layer 0"))
+        );
+        assert!(
+            progress
+                .iter()
                 .any(|line| line.contains("parent block(s); 1 staged block(s) remain"))
         );
+        server.join();
+    }
+
+    #[tokio::test]
+    async fn ingestion_only_stage_returns_placeholder_root_id() {
+        let temp = tempdir().unwrap();
+        let document_a = temp.path().join("alpha.txt");
+        let document_b = temp.path().join("beta.txt");
+        fs::write(&document_a, b"alpha\n").unwrap();
+        fs::write(&document_b, b"beta\n").unwrap();
+
+        let server = spawn_embedding_server(2);
+        let request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: server.base_url.clone(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::IngestionAndEmbedding,
+            max_concurrency: None,
+            items: vec![
+                BatchItemConfig::Document {
+                    path: document_a.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                },
+                BatchItemConfig::Document {
+                    path: document_b.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+
+        let summary = run_request(temp.path(), request).await.unwrap();
+
+        assert_eq!(summary.root_id, placeholder_root_id());
+        assert_eq!(summary.block_ids.len(), 2);
+        server.join();
+    }
+
+    #[tokio::test]
+    async fn clustering_only_stage_reuses_store_leaf_blocks_and_skips_embedding_configuration() {
+        let temp = tempdir().unwrap();
+        let document_a = temp.path().join("alpha.txt");
+        let document_b = temp.path().join("beta.txt");
+        fs::write(&document_a, b"alpha\n").unwrap();
+        fs::write(&document_b, b"beta\n").unwrap();
+
+        let server = spawn_embedding_server(2);
+        let full_request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: server.base_url.clone(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
+            max_concurrency: None,
+            items: vec![
+                BatchItemConfig::Document {
+                    path: document_a.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                },
+                BatchItemConfig::Document {
+                    path: document_b.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+        let seeded = run_request(temp.path(), full_request).await.unwrap();
+
+        let cluster_only_request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: String::new(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::ClusteringAndBlockAssembly,
+            max_concurrency: None,
+            items: vec![],
+        };
+
+        let first = run_request(temp.path(), cluster_only_request.clone())
+            .await
+            .unwrap();
+        let second = run_request(temp.path(), cluster_only_request)
+            .await
+            .unwrap();
+
+        assert_eq!(first.root_id, seeded.root_id);
+        assert_eq!(second.root_id, seeded.root_id);
+        assert_eq!(first.block_ids, second.block_ids);
+        server.join();
+    }
+
+    #[tokio::test]
+    async fn request_file_stage_override_allows_clustering_only_with_request_items_present() {
+        let temp = tempdir().unwrap();
+        let document_a = temp.path().join("alpha.txt");
+        let document_b = temp.path().join("beta.txt");
+        fs::write(&document_a, b"alpha\n").unwrap();
+        fs::write(&document_b, b"beta\n").unwrap();
+
+        let server = spawn_embedding_server(2);
+        let seeded = run_request(
+            temp.path(),
+            BatchRequest {
+                environment: EnvironmentConfig::Local {
+                    block_store_root: Path::new("blocks").to_path_buf(),
+                    embedding: LocalEmbeddingConfig {
+                        base_url: server.base_url.clone(),
+                        model: "all-MiniLM-L6-v2".into(),
+                        api_key_env: None,
+                        request_timeout_secs: 5,
+                        max_retries: 0,
+                        retry_delay_ms: 1,
+                    },
+                },
+                embedding_spec: EmbeddingSpecConfig {
+                    dims: 2,
+                    encoding: "f32le".into(),
+                },
+                block_size_target: 65_536,
+                stage: ExecutionStage::FullPipeline,
+                max_concurrency: None,
+                items: vec![
+                    BatchItemConfig::Document {
+                        path: document_a.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                        metadata: BTreeMap::new(),
+                    },
+                    BatchItemConfig::Document {
+                        path: document_b.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                        metadata: BTreeMap::new(),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+        let request_path = temp.path().join("request.json");
+        fs::write(
+            &request_path,
+            serde_json::to_vec_pretty(&json!({
+                "environment": {
+                    "kind": "local",
+                    "block_store_root": "blocks",
+                    "embedding": {
+                        "base_url": server.base_url,
+                        "model": "all-MiniLM-L6-v2",
+                        "request_timeout_secs": 5,
+                        "max_retries": 0,
+                        "retry_delay_ms": 1
+                    }
+                },
+                "embedding_spec": {
+                    "dims": 2,
+                    "encoding": "f32le"
+                },
+                "items": [
+                    {
+                        "kind": "document",
+                        "path": "alpha.txt"
+                    },
+                    {
+                        "kind": "document",
+                        "path": "beta.txt"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let summary = run_request_file_with_stage(
+            &request_path,
+            Some(ExecutionStage::ClusteringAndBlockAssembly),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.root_id, seeded.root_id);
         server.join();
     }
 
@@ -513,6 +1024,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: Some(1),
             items: vec![
                 BatchItemConfig::Document {
@@ -589,6 +1101,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: Some(1),
             items: vec![BatchItemConfig::Mailbox {
                 path: mailbox_path
@@ -645,6 +1158,7 @@ mod tests {
                 encoding: "f32le".into(),
             },
             block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
             max_concurrency: Some(3),
             items: vec![
                 BatchItemConfig::Document {

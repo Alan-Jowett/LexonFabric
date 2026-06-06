@@ -6,5 +6,8 @@ mod paths;
 pub mod resolver;
 pub mod runtime;
 
-pub use config::{BatchRequest, BatchSummary};
-pub use runtime::{run_request, run_request_file, write_summary_file};
+pub use config::{BatchRequest, BatchSummary, ExecutionStage};
+pub use runtime::{
+    INGESTION_ONLY_ROOT_ID_PLACEHOLDER, run_request, run_request_file, run_request_file_with_stage,
+    write_summary_file,
+};

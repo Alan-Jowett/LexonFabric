@@ -4,7 +4,8 @@
 
 Phase 2 validation patch for the approved email-artifact, chunk-level
 indexing, local filesystem block-store interoperability, incremental
-delegated indexing, batch-progress observability, and layer-parallel
+delegated indexing, stage-selectable execution, standalone clustering input
+discovery, clustering-status observability, and layer-parallel
 block-construction evolution in
 `docs/specs/lexonfabric-indexer/requirements.md` and
 `docs/specs/lexonfabric-indexer/design.md`.
@@ -13,9 +14,10 @@ block-construction evolution in
 
 These validation entries define the expected conformance surface for the
 LexonFabric-owned indexer boundary, including local filesystem block-store
-interoperability, incremental delegated indexing, batch-progress
-observability, and leaf-layer parallel block scheduling in the local/testing
-profile.
+interoperability, incremental delegated indexing, stage-selectable execution,
+standalone clustering input discovery, batch-progress observability,
+clustering-status observability, and leaf-layer parallel block scheduling in
+the local/testing profile.
 
 This package validates LexonFabric's batch contract, adapter selection, and
 delegated use of LexonGraph interfaces. It does not redefine validation already
@@ -29,9 +31,12 @@ owned by LexonGraph for `lexongraph-indexer`, `BlockStore`, or
 Inspect the containerized indexer entrypoint contract.
 
 **Pass condition:** the runtime executes as a Linux batch container and accepts
-a collection-oriented indexing request rather than a single hard-coded source.
+a collection-oriented indexing request rather than a single hard-coded source,
+and the entrypoint preserves one default full-pipeline mode plus the approved
+stage-selection surface.
 
-**Traces to:** RQ-INDEXER-001, RQ-INDEXER-002, DSG-LFI-002
+**Traces to:** RQ-INDEXER-001, RQ-INDEXER-002, RQ-INDEXER-003D, DSG-LFI-001D,
+DSG-LFI-002
 
 ### VAL-LFI-001A
 
@@ -81,6 +86,44 @@ not claim in-repo higher-layer concurrency that the delegated upstream surface
 does not expose.
 
 **Traces to:** RQ-INDEXER-003B, DSG-LFI-001B, DSG-LFI-001C
+
+### VAL-LFI-002G
+
+Inspect the stage-selection surface on the CLI and `BatchRequest` contract.
+
+**Pass condition:** the same approved stage selector is representable on both
+surfaces, omitting it defaults to the full pipeline, a clustering-only request
+may use an empty item collection, and stage selection does not introduce a
+stage-specific result-schema family distinct from `BatchSummary`.
+
+**Traces to:** RQ-INDEXER-001, RQ-INDEXER-002, RQ-INDEXER-003D, DSG-LFI-001D,
+DSG-LFI-007B
+
+### VAL-LFI-002H
+
+Run the ingestion-plus-embedding stage without the clustering-plus-block-
+assembly stage for a representative mailbox batch.
+
+**Pass condition:** LexonFabric expands mailbox inputs, persists the resulting
+artifacts and delegated leaf output, does not require clustering or parent
+assembly in the same invocation, and still returns the existing `BatchSummary`
+shape.
+
+**Traces to:** RQ-INDEXER-003A, RQ-INDEXER-003D, DSG-LFI-001A, DSG-LFI-001D
+
+### VAL-LFI-002I
+
+Run the clustering-plus-block-assembly stage against a configured block store
+that already contains representative delegated blocks and an empty request item
+collection.
+
+**Pass condition:** LexonFabric iterates all clustering-eligible blocks exposed
+by the upstream block-iteration contract for the configured store, excludes
+stored artifacts outside that upstream input surface, and performs clustering
+or block assembly without requiring a prior LexonFabric summary manifest.
+
+**Traces to:** RQ-INDEXER-002, RQ-INDEXER-003E, RQ-INDEXER-010A,
+DSG-LFI-001E
 
 ### VAL-LFI-002A
 
@@ -165,13 +208,16 @@ DSG-LFI-006, DSG-LFI-007, DSG-LFI-008
 Inspect the batch-request runtime tuning surface for local/testing and the
 preserved production profile boundary.
 
-**Pass condition:** both profiles use the same optional `max_concurrency`
-request field, an explicit value caps same-layer delegated leaf work, and an
-omitted value defaults to one half of detected physical CPUs with a minimum of
-one worker slot. Any fallback used when direct physical-core detection is not
-available remains documented and does not change the request shape.
+**Pass condition:** both profiles use the same optional `max_concurrency` and
+`stage` request fields, an explicit `max_concurrency` value caps same-layer
+delegated leaf work, an omitted `max_concurrency` value defaults to one half of
+detected physical CPUs with a minimum of one worker slot, and an omitted
+`stage` value defaults to the full pipeline. Any fallback used when direct
+physical-core detection is not available remains documented and does not change
+the request shape.
 
-**Traces to:** RQ-INDEXER-003C, RQ-INDEXER-007, DSG-LFI-007B, DSG-LFI-008
+**Traces to:** RQ-INDEXER-003C, RQ-INDEXER-003D, RQ-INDEXER-007, DSG-LFI-007B,
+DSG-LFI-008
 
 ### VAL-LFI-005
 
@@ -233,10 +279,23 @@ mailbox-processing and delegated-indexing steps.
 
 **Pass condition:** the normal batch log stream reports forward progress before
 the final summary, including mailbox-processing visibility plus delegated
-indexing visibility, so an operator can distinguish an active run from a hung
-run without consulting a separate control-plane service.
+indexing visibility and callback-driven clustering visibility when the selected
+stage includes clustering, so an operator can distinguish an active run from a
+hung run without consulting a separate control-plane service.
 
 **Traces to:** RQ-INDEXER-008B, DSG-LFI-002A
+
+### VAL-LFI-007B
+
+Run the clustering-only stage twice against an unchanged clustering-eligible
+block-store snapshot.
+
+**Pass condition:** the same clustering-eligible block set surfaced by the
+upstream block-iteration contract produces the same logical clustering result on
+repeated standalone clustering runs, without requiring repository-local
+duplicate-suppression logic.
+
+**Traces to:** RQ-INDEXER-003E, RQ-INDEXER-008, DSG-LFI-001E, DSG-LFI-010
 
 ### VAL-LFI-008
 

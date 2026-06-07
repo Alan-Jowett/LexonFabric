@@ -336,8 +336,7 @@ fn prepare_request_replay_batches(
             progress,
             format!(
                 "Indexing {} document item(s) with up to {} concurrent leaf worker(s)",
-                document_item_count,
-                max_concurrency
+                document_item_count, max_concurrency
             ),
         );
         append_chunked_replay_batches(

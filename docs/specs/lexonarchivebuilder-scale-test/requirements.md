@@ -2,8 +2,8 @@
 
 ## Document Status
 
-- **Phase:** Phase 1 - Requirements Discovery
-- **Status:** Pending user approval for caller-selectable delegated clustering configuration
+- **Phase:** Phase 2 - Specification Changes
+- **Status:** Approved requirements patch being propagated into design and validation
 - **Scope:** `lexonarchivebuilder-scale-test` local stress-test wrapper for rsync-backed mailbox acquisition, caller-selected delegated clustering configuration, and delegated block-tree generation
 
 ## USER-REQUEST
@@ -28,8 +28,8 @@
 - **UR-SCALE-18 [INFERRED]:** Docker Compose must be a supported user-facing entrypoint for the same local stress-test workflow rather than a second divergent workflow.
 - **UR-SCALE-19 [KNOWN]:** Mailbox discovery for fetched rsync mirrors must work when the mirrored archive exposes mailbox files with the `.mail` extension as well as the `.mbox` extension.
 - **UR-SCALE-20 [KNOWN]:** For this increment, mailbox discovery compatibility should be limited to exactly `.mail` and `.mbox` rather than broadened to arbitrary mailbox archive extensions.
-- **UR-SCALE-21 [KNOWN]:** Update the scale test so the caller can select the indexing algorithm used by the delegated indexer.
-- **UR-SCALE-22 [KNOWN]:** Update the scale test so the caller can pass indexing options into the delegated indexer.
+- **UR-SCALE-21 [KNOWN]:** Update the scale test so the caller can select the delegated clustering algorithm used by the delegated indexer.
+- **UR-SCALE-22 [KNOWN]:** Update the scale test so the caller can pass delegated clustering options into the delegated indexer.
 - **UR-SCALE-23 [KNOWN]:** The scale-test caller contract should expose the existing indexer clustering controls as first-class wrapper flags and pass them through to the delegated indexer.
 - **UR-SCALE-24 [INFERRED]:** The scale-test wrapper should reuse the delegated indexer's supported clustering algorithm names and option meanings rather than inventing wrapper-local clustering semantics.
 - **UR-SCALE-25 [KNOWN]:** Generic arbitrary extra indexer argument passthrough is not the approved caller contract for this increment.

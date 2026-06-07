@@ -202,6 +202,7 @@ The same clustering flags can be passed through the Docker Compose entrypoint:
 
 ```powershell
 docker compose run --rm scale-test `
+  --sources-file /workspace/examples/local/scale-test/rsync.sources.sample.txt `
   --clustering-algorithm dcbc `
   --clustering-cluster-count 2 `
   --clustering-random-seed 11

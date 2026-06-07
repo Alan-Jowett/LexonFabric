@@ -1,29 +1,33 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
 use lexongraph_block::{
-    Block, BlockError, BlockHash, EmbeddingSpec, SerializedBlock, deserialize_block,
-    serialize_block,
+    Block, BlockError, BlockHash, EmbeddingSpec, LeafEntry, SerializedBlock, VERSION_1,
+    build_leaf_block, deserialize_block, serialize_block,
 };
-use lexongraph_block_store::BlockStoreError;
-use lexongraph_indexer::{
-    ConstructedBlocks, IndexItem, Indexer, IndexerError, IndexingPhase, IndexingStatus,
-    IndexingStatusObserver, IndexingStatusState,
+use lexongraph_block_store::{BlockStore, BlockStoreError};
+use lexongraph_embeddings_trait::{EmbeddingInput, EmbeddingProvider};
+use lexongraph_streaming_indexer::{
+    ContentResolver, IndexItem, StreamingIndexerError, StreamingIndexingPhase,
+    StreamingIndexingRun, StreamingIndexingStatus, StreamingIndexingStatusObserver,
+    StreamingIndexingStatusState,
 };
 use thiserror::Error;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::block_store::ConfiguredBlockStore;
-use crate::config::{BatchItemConfig, BatchRequest, BatchSummary, ConfigError, ExecutionStage};
-use crate::embedding::{
-    AzureOpenAiEmbeddingProviderStub, ConfiguredEmbeddingProvider, ConfiguredEmbeddingProviderError,
+use crate::config::{
+    BatchItemConfig, BatchRequest, BatchSummary, ConfigError, ExecutionStage, metadata_to_text_map,
 };
+use crate::embedding::{ConfiguredEmbeddingProvider, ConfiguredEmbeddingProviderError};
 use crate::mailbox::{MailboxExpansionError, expand_mailbox_item_with_stats};
 use crate::paths::resolve_path;
-use crate::resolver::{ContentRef, LocalFilesystemContentResolver};
+use crate::resolver::{
+    ContentRef, LocalFilesystemContentResolver, LocalFilesystemContentResolverError,
+};
 
-type RuntimeIndexer = Indexer<LocalFilesystemContentResolver, ConfiguredEmbeddingProvider>;
 type ProgressReporter = Arc<dyn Fn(String) + Send + Sync + 'static>;
 
 pub const INGESTION_ONLY_ROOT_ID_PLACEHOLDER: &str =
@@ -33,6 +37,31 @@ pub const INGESTION_ONLY_ROOT_ID_PLACEHOLDER: &str =
 struct StagedBlocks {
     block_ids: Vec<BlockHash>,
     blocks: Vec<SerializedBlock>,
+}
+
+#[derive(Debug, Default)]
+struct ConstructedBlocks {
+    block_ids: Vec<BlockHash>,
+    blocks: Vec<SerializedBlock>,
+}
+
+#[derive(Clone, Debug)]
+struct ReplayBatch {
+    items: Vec<IndexItem<ContentRef>>,
+    completion_message: Option<String>,
+}
+
+type ReplayedLeaf = (IndexItem<ContentRef>, Vec<u8>);
+
+#[derive(Clone, Debug)]
+struct StoredLeafEmbeddingProvider {
+    embeddings_by_input_hash: Arc<HashMap<[u8; 32], Vec<u8>>>,
+}
+
+#[derive(Debug, Error)]
+enum StoredLeafEmbeddingProviderError {
+    #[error("no stored embedding was available for the requested replay input")]
+    MissingStoredEmbedding,
 }
 
 impl StagedBlocks {
@@ -88,7 +117,9 @@ pub enum RuntimeError {
     #[error("staged block hash mismatch: expected {expected}, store returned {actual}")]
     StagedBlockHashMismatch { expected: String, actual: String },
     #[error(transparent)]
-    Indexer(#[from] IndexerError),
+    StreamingIndexer(#[from] StreamingIndexerError),
+    #[error(transparent)]
+    Resolver(#[from] LocalFilesystemContentResolverError),
     #[error("delegated indexing produced no blocks")]
     EmptyDelegatedOutput,
     #[error("the configured block store contains no clustering-eligible blocks")]
@@ -105,6 +136,10 @@ pub enum RuntimeError {
     },
     #[error("iterated block hash mismatch: expected {expected}, rebuilt block produced {actual}")]
     IteratedBlockHashMismatch { expected: String, actual: String },
+    #[error(
+        "iterated block {block_id} does not contain replay metadata for a supported content item"
+    )]
+    MissingReplayMetadata { block_id: String },
     #[error("leaf-indexing worker task failed: {0}")]
     LeafTaskJoin(#[from] JoinError),
     #[error("failed to write batch summary {path}: {source}")]
@@ -115,6 +150,22 @@ pub enum RuntimeError {
     },
     #[error("failed to render batch summary: {0}")]
     RenderSummary(#[from] serde_json::Error),
+}
+
+impl EmbeddingProvider for StoredLeafEmbeddingProvider {
+    type Error = StoredLeafEmbeddingProviderError;
+
+    async fn embed(
+        &self,
+        input: &EmbeddingInput,
+        _: &EmbeddingSpec,
+    ) -> Result<Vec<u8>, Self::Error> {
+        let key = hash_embedding_input(input).into_bytes();
+        self.embeddings_by_input_hash
+            .get(&key)
+            .cloned()
+            .ok_or(StoredLeafEmbeddingProviderError::MissingStoredEmbedding)
+    }
 }
 
 pub async fn run_request_file(request_path: &Path) -> Result<BatchSummary, RuntimeError> {
@@ -160,119 +211,125 @@ where
     let progress: ProgressReporter = Arc::new(progress);
     request.validate()?;
     let stage = request.stage;
-    let embedding_provider = configured_embedding_provider_for_stage(stage, &request)?;
     let block_store = ConfiguredBlockStore::from_environment(request_dir, &request.environment)?;
-    let indexer = Indexer::with_defaults(LocalFilesystemContentResolver, embedding_provider);
     let embedding_spec = request.to_embedding_spec();
+    let resolver = LocalFilesystemContentResolver::new(block_store.clone());
     let max_concurrency = request.effective_max_concurrency();
-    let staged = if stage.includes_ingestion() {
-        run_ingestion_stage(
-            &indexer,
+
+    if stage == ExecutionStage::IngestionAndEmbedding {
+        request.environment.local_embedding()?;
+        let embedding_provider =
+            ConfiguredEmbeddingProvider::from_environment(&request.environment)?;
+        let replay_batches = prepare_request_replay_batches(
             request_dir,
             &request,
             &block_store,
+            max_concurrency,
+            &progress,
+        )?;
+        if replay_batches.is_empty() {
+            return Err(RuntimeError::NoClusterableBlocks);
+        }
+        return run_ingestion_only_stage(
+            &block_store,
+            resolver,
+            embedding_provider,
+            replay_batches,
             &embedding_spec,
             max_concurrency,
             &progress,
         )
-        .await?
-    } else {
-        load_clusterable_blocks(&block_store, &embedding_spec, &progress)?
-    };
-
-    if !stage.includes_clustering() {
-        report_progress(
-            &progress,
-            format!(
-                "Skipped clustering and block assembly; returning placeholder root_id {}",
-                placeholder_root_id()
-            ),
-        );
-        return Ok(staged.into_summary(placeholder_root_id()));
+        .await;
     }
 
-    run_clustering_stage(
-        &indexer,
-        staged,
+    if stage.includes_ingestion() {
+        let replay_batches = prepare_request_replay_batches(
+            request_dir,
+            &request,
+            &block_store,
+            max_concurrency,
+            &progress,
+        )?;
+        if replay_batches.is_empty() {
+            return Err(RuntimeError::NoClusterableBlocks);
+        }
+        request.environment.local_embedding()?;
+        let embedding_provider =
+            ConfiguredEmbeddingProvider::from_environment(&request.environment)?;
+        return run_streaming_stage(
+            resolver,
+            embedding_provider,
+            replay_batches,
+            &block_store,
+            &embedding_spec,
+            request.block_size_target,
+            &progress,
+        )
+        .await;
+    }
+
+    let (replay_batches, embedding_provider) =
+        load_replay_batches_from_store(&block_store, &embedding_spec, &progress)?;
+    run_streaming_stage(
+        resolver,
+        embedding_provider,
+        replay_batches,
         &block_store,
         &embedding_spec,
         request.block_size_target,
         &progress,
     )
+    .await
 }
 
-async fn build_leaf_blocks_concurrently(
-    indexer: &RuntimeIndexer,
-    items: &[IndexItem<ContentRef>],
-    embedding_spec: &EmbeddingSpec,
-    max_concurrency: usize,
-) -> Result<ConstructedBlocks, RuntimeError> {
-    if items.is_empty() {
-        return Ok(ConstructedBlocks {
-            block_ids: Vec::new(),
-            blocks: Vec::new(),
-        });
-    }
-
-    let concurrency = max_concurrency.max(1).min(items.len());
-    let batch_size = items.len().div_ceil(concurrency);
-    let batch_count = items.len().div_ceil(batch_size);
-    let mut join_set = JoinSet::new();
-    for (batch_index, chunk) in items.chunks(batch_size).enumerate() {
-        let indexer = indexer.clone();
-        let embedding_spec = embedding_spec.clone();
-        let batch_items = chunk.to_vec();
-        join_set.spawn(async move {
-            let constructed = indexer
-                .build_leaf_blocks(&batch_items, embedding_spec)
-                .await?;
-            Ok::<(usize, ConstructedBlocks), IndexerError>((batch_index, constructed))
-        });
-    }
-
-    let mut completed = vec![None; batch_count];
-    while let Some(result) = join_set.join_next().await {
-        let (batch_index, constructed) = result??;
-        completed[batch_index] = Some(constructed);
-    }
-
-    let mut block_ids = Vec::with_capacity(items.len());
-    let mut blocks = Vec::with_capacity(items.len());
-    for constructed in completed.into_iter().flatten() {
-        block_ids.extend(constructed.block_ids);
-        blocks.extend(constructed.blocks);
-    }
-
-    Ok(ConstructedBlocks { block_ids, blocks })
-}
-
-fn configured_embedding_provider_for_stage(
-    stage: ExecutionStage,
-    request: &BatchRequest,
-) -> Result<ConfiguredEmbeddingProvider, RuntimeError> {
-    if stage.includes_ingestion() {
-        request.environment.local_embedding()?;
-        return ConfiguredEmbeddingProvider::from_environment(&request.environment)
-            .map_err(RuntimeError::from);
-    }
-
-    Ok(ConfiguredEmbeddingProvider::AzureOpenAi(
-        AzureOpenAiEmbeddingProviderStub,
-    ))
-}
-
-async fn run_ingestion_stage(
-    indexer: &RuntimeIndexer,
-    request_dir: &Path,
-    request: &BatchRequest,
-    block_store: &dyn lexongraph_block_store::BlockStore,
+async fn run_ingestion_only_stage(
+    block_store: &ConfiguredBlockStore,
+    resolver: LocalFilesystemContentResolver,
+    embedding_provider: ConfiguredEmbeddingProvider,
+    replay_batches: Vec<ReplayBatch>,
     embedding_spec: &EmbeddingSpec,
     max_concurrency: usize,
     progress: &ProgressReporter,
-) -> Result<StagedBlocks, RuntimeError> {
-    let document_items = request.to_document_index_items(request_dir);
+) -> Result<BatchSummary, RuntimeError> {
     let mut staged = StagedBlocks::default();
+    for batch in replay_batches {
+        let constructed = build_leaf_blocks_concurrently(
+            resolver.clone(),
+            embedding_provider.clone(),
+            &batch.items,
+            embedding_spec,
+            max_concurrency,
+        )
+        .await?;
+        persist_staged_blocks(&constructed.blocks, block_store)?;
+        if let Some(message) = batch.completion_message {
+            report_progress(
+                progress,
+                format!("{message} into {} leaf block(s)", constructed.blocks.len()),
+            );
+        }
+        staged.extend_constructed(&constructed);
+    }
+    report_progress(
+        progress,
+        format!(
+            "Skipped clustering and block assembly; returning placeholder root_id {}",
+            placeholder_root_id()
+        ),
+    );
+    Ok(staged.into_summary(placeholder_root_id()))
+}
 
+fn prepare_request_replay_batches(
+    request_dir: &Path,
+    request: &BatchRequest,
+    block_store: &ConfiguredBlockStore,
+    max_concurrency: usize,
+    progress: &ProgressReporter,
+) -> Result<Vec<ReplayBatch>, RuntimeError> {
+    let mut batches = Vec::new();
+
+    let document_items = request.to_document_index_items(request_dir);
     if !document_items.is_empty() {
         report_progress(
             progress,
@@ -282,23 +339,10 @@ async fn run_ingestion_stage(
                 max_concurrency
             ),
         );
-        let constructed = build_leaf_blocks_concurrently(
-            indexer,
-            &document_items,
-            embedding_spec,
-            max_concurrency,
-        )
-        .await?;
-        persist_staged_blocks(&constructed.blocks, block_store)?;
-        report_progress(
-            progress,
-            format!(
-                "Indexed {} document item(s) into {} leaf block(s)",
-                document_items.len(),
-                constructed.blocks.len()
-            ),
-        );
-        staged.extend_constructed(&constructed);
+        batches.push(ReplayBatch {
+            completion_message: Some(format!("Indexed {} document item(s)", document_items.len())),
+            items: document_items,
+        });
     }
 
     for item in &request.items {
@@ -318,90 +362,211 @@ async fn run_ingestion_stage(
                     expansion.items.len()
                 ),
             );
-            let constructed = build_leaf_blocks_concurrently(
-                indexer,
-                &expansion.items,
-                embedding_spec,
-                max_concurrency,
-            )
-            .await?;
-            persist_staged_blocks(&constructed.blocks, block_store)?;
-            report_progress(
-                progress,
-                format!(
-                    "Indexed {} delegated item(s) from mailbox {} into {} leaf block(s)",
+            batches.push(ReplayBatch {
+                completion_message: Some(format!(
+                    "Indexed {} delegated item(s) from mailbox {}",
                     expansion.items.len(),
-                    resolved.display(),
-                    constructed.blocks.len()
-                ),
-            );
-            staged.extend_constructed(&constructed);
+                    resolved.display()
+                )),
+                items: expansion.items,
+            });
         }
     }
 
-    Ok(staged)
+    Ok(batches)
 }
 
-fn run_clustering_stage(
-    indexer: &RuntimeIndexer,
-    mut staged: StagedBlocks,
-    block_store: &dyn lexongraph_block_store::BlockStore,
+async fn build_leaf_blocks_concurrently(
+    resolver: LocalFilesystemContentResolver,
+    embedding_provider: ConfiguredEmbeddingProvider,
+    items: &[IndexItem<ContentRef>],
+    embedding_spec: &EmbeddingSpec,
+    max_concurrency: usize,
+) -> Result<ConstructedBlocks, RuntimeError> {
+    if items.is_empty() {
+        return Ok(ConstructedBlocks {
+            block_ids: Vec::new(),
+            blocks: Vec::new(),
+        });
+    }
+
+    let concurrency = max_concurrency.max(1).min(items.len());
+    let batch_size = items.len().div_ceil(concurrency);
+    let batch_count = items.len().div_ceil(batch_size);
+    let mut join_set = JoinSet::new();
+    for (batch_index, chunk) in items.chunks(batch_size).enumerate() {
+        let resolver = resolver.clone();
+        let embedding_provider = embedding_provider.clone();
+        let embedding_spec = embedding_spec.clone();
+        let batch_items = chunk.to_vec();
+        join_set.spawn(async move {
+            let constructed = construct_leaf_block_batch(
+                resolver,
+                embedding_provider,
+                batch_items,
+                embedding_spec,
+            )
+            .await?;
+            Ok::<(usize, ConstructedBlocks), RuntimeError>((batch_index, constructed))
+        });
+    }
+
+    let mut completed = (0..batch_count).map(|_| None).collect::<Vec<_>>();
+    while let Some(result) = join_set.join_next().await {
+        let (batch_index, constructed) = result??;
+        completed[batch_index] = Some(constructed);
+    }
+
+    let mut block_ids = Vec::with_capacity(items.len());
+    let mut blocks = Vec::with_capacity(items.len());
+    for constructed in completed.into_iter().flatten() {
+        block_ids.extend(constructed.block_ids);
+        blocks.extend(constructed.blocks);
+    }
+
+    Ok(ConstructedBlocks { block_ids, blocks })
+}
+
+async fn construct_leaf_block_batch(
+    resolver: LocalFilesystemContentResolver,
+    embedding_provider: ConfiguredEmbeddingProvider,
+    items: Vec<IndexItem<ContentRef>>,
+    embedding_spec: EmbeddingSpec,
+) -> Result<ConstructedBlocks, RuntimeError> {
+    let mut contents = Vec::with_capacity(items.len());
+    let mut inputs = Vec::with_capacity(items.len());
+    for item in &items {
+        let content = resolver.resolve(&item.content_ref)?;
+        inputs.push(lexongraph_embeddings_trait::EmbeddingInput {
+            media_type: content.media_type.clone(),
+            body: content.body.clone(),
+        });
+        contents.push(content);
+    }
+
+    let embeddings = lexongraph_embeddings_trait::EmbeddingProvider::embed_batch(
+        &embedding_provider,
+        &inputs,
+        &embedding_spec,
+    )
+    .await
+    .map_err(RuntimeError::Provider)?;
+
+    let mut constructed = ConstructedBlocks::default();
+    for ((item, content), embedding) in items.iter().zip(contents.into_iter()).zip(embeddings) {
+        let block = build_leaf_block(
+            VERSION_1,
+            embedding_spec.clone(),
+            vec![LeafEntry {
+                embedding,
+                metadata: item.metadata.clone(),
+                content,
+            }],
+            None,
+        )
+        .map_err(|source| RuntimeError::DeserializeStagedBlock {
+            block_id: "<leaf>".into(),
+            source,
+        })?;
+        let block = Block::Leaf(block);
+        let serialized =
+            serialize_block(&block).map_err(|source| RuntimeError::SerializeIteratedBlock {
+                block_id: "<leaf>".into(),
+                source,
+            })?;
+        constructed.block_ids.push(serialized.hash);
+        constructed.blocks.push(serialized);
+    }
+    Ok(constructed)
+}
+
+async fn run_streaming_stage<EP>(
+    resolver: LocalFilesystemContentResolver,
+    embedding_provider: EP,
+    replay_batches: Vec<ReplayBatch>,
+    block_store: &ConfiguredBlockStore,
     embedding_spec: &EmbeddingSpec,
     block_size_target: usize,
     progress: &ProgressReporter,
-) -> Result<BatchSummary, RuntimeError> {
+) -> Result<BatchSummary, RuntimeError>
+where
+    EP: EmbeddingProvider + Clone,
+{
     let observer = Some(make_status_observer(Arc::clone(progress)));
-    let mut current_layer = unique_serialized_blocks_by_hash(std::mem::take(&mut staged.blocks));
-    let mut layer_index = 0;
+    let replay_items = replay_batches
+        .iter()
+        .map(|batch| batch.items.clone())
+        .collect::<Vec<_>>();
 
-    if current_layer.is_empty() {
+    let mut indexer = StreamingIndexingRun::with_defaults(
+        resolver,
+        embedding_provider,
+        embedding_spec.clone(),
+        block_size_target,
+    );
+    if let Some(observer) = observer {
+        indexer = indexer.with_observer(observer);
+    }
+
+    for batch in &replay_batches {
+        if batch.items.is_empty() {
+            continue;
+        }
+        indexer.ingest_batch(&batch.items).await?;
+        if let Some(message) = &batch.completion_message {
+            report_progress(progress, message.clone());
+        }
+    }
+    let pass_report = indexer.finish_pass()?;
+    report_progress(
+        progress,
+        format!(
+            "Completed training pass {} over {} item(s)",
+            pass_report.completed_pass_count, pass_report.observed_item_count
+        ),
+    );
+    indexer.mark_training_complete()?;
+    report_progress(
+        progress,
+        "Streaming training complete; starting final materialization".into(),
+    );
+    let result = indexer
+        .finalize(
+            replay_items.iter().map(|batch| batch.as_slice()),
+            block_store,
+        )
+        .await?;
+
+    if result.block_ids.is_empty() {
         return Err(RuntimeError::EmptyDelegatedOutput);
     }
 
-    while current_layer.len() > 1 {
-        let input_count = current_layer.len();
-        let constructed = indexer.build_parent_blocks_with_observer(
-            &current_layer,
-            embedding_spec.clone(),
-            block_size_target,
-            layer_index,
-            observer.clone(),
-        )?;
-        persist_staged_blocks(&constructed.blocks, block_store)?;
-        let blocks_produced = constructed.blocks.len();
-        let next_layer = unique_serialized_blocks_by_hash(constructed.blocks.clone());
-        report_progress(
-            progress,
-            format!(
-                "Indexed {} staged block(s) into {} parent block(s); {} staged block(s) remain",
-                input_count,
-                blocks_produced,
-                next_layer.len()
-            ),
-        );
-        staged.extend_constructed(&constructed);
-        current_layer = next_layer;
-        layer_index += 1;
-    }
-
-    let root = current_layer
-        .first()
-        .ok_or(RuntimeError::EmptyDelegatedOutput)?
-        .hash;
-    Ok(staged.into_summary(root.to_string()))
+    let mut block_ids = result
+        .block_ids
+        .into_iter()
+        .map(|block_id| block_id.to_string())
+        .collect::<Vec<_>>();
+    block_ids.sort();
+    block_ids.dedup();
+    Ok(BatchSummary {
+        root_id: result.root_id.to_string(),
+        block_count: block_ids.len(),
+        block_ids,
+    })
 }
 
-fn load_clusterable_blocks(
-    store: &dyn lexongraph_block_store::BlockStore,
+fn load_replay_batches_from_store(
+    store: &ConfiguredBlockStore,
     embedding_spec: &EmbeddingSpec,
     progress: &ProgressReporter,
-) -> Result<StagedBlocks, RuntimeError> {
+) -> Result<(Vec<ReplayBatch>, StoredLeafEmbeddingProvider), RuntimeError> {
     report_progress(
         progress,
         "Scanning the configured block store for clustering-eligible leaf blocks".to_string(),
     );
 
-    let mut staged = StagedBlocks::default();
+    let mut items = Vec::new();
+    let mut embeddings_by_input_hash = HashMap::new();
     for block_id in store.iter_block_ids()? {
         let block_id = block_id?;
         let Some(validated) = store.get(&block_id)? else {
@@ -409,31 +574,49 @@ fn load_clusterable_blocks(
                 block_id: block_id.to_string(),
             });
         };
-        let Some(serialized) = serialize_clusterable_block(&validated, embedding_spec)? else {
+        let Some((item, embedding)) = replay_item_from_validated_block(&validated, embedding_spec)?
+        else {
             continue;
         };
-        staged.block_ids.push(validated.hash);
-        staged.blocks.push(serialized);
+        let content = match &validated.block {
+            Block::Leaf(block) => &block.entries[0].content,
+            Block::Branch(_) => unreachable!("filtered above"),
+        };
+        let key = hash_embedding_input(&EmbeddingInput {
+            media_type: content.media_type.clone(),
+            body: content.body.clone(),
+        })
+        .into_bytes();
+        embeddings_by_input_hash.insert(key, embedding);
+        items.push(item);
     }
 
-    if staged.blocks.is_empty() {
+    if items.is_empty() {
         return Err(RuntimeError::NoClusterableBlocks);
     }
 
     report_progress(
         progress,
         format!(
-            "Loaded {} clustering-eligible leaf block(s) from the configured block store",
-            staged.blocks.len()
+            "Loaded {} replay item(s) from clustering-eligible leaf blocks in the configured block store",
+            items.len()
         ),
     );
-    Ok(staged)
+    Ok((
+        vec![ReplayBatch {
+            items,
+            completion_message: None,
+        }],
+        StoredLeafEmbeddingProvider {
+            embeddings_by_input_hash: Arc::new(embeddings_by_input_hash),
+        },
+    ))
 }
 
-fn serialize_clusterable_block(
+fn replay_item_from_validated_block(
     validated: &lexongraph_block::ValidatedBlock,
     embedding_spec: &EmbeddingSpec,
-) -> Result<Option<SerializedBlock>, RuntimeError> {
+) -> Result<Option<ReplayedLeaf>, RuntimeError> {
     let Block::Leaf(block) = &validated.block else {
         return Ok(None);
     };
@@ -446,72 +629,206 @@ fn serialize_clusterable_block(
         return Ok(None);
     }
 
-    let serialized = serialize_block(&validated.block).map_err(|source| {
-        RuntimeError::SerializeIteratedBlock {
+    let entry = &block.entries[0];
+    let fields = metadata_to_text_map(&entry.metadata);
+    let Some(source_kind) = fields.get("source_kind").map(String::as_str) else {
+        return Err(RuntimeError::MissingReplayMetadata {
             block_id: validated.hash.to_string(),
-            source,
-        }
-    })?;
-    if serialized.hash != validated.hash {
-        return Err(RuntimeError::IteratedBlockHashMismatch {
-            expected: validated.hash.to_string(),
-            actual: serialized.hash.to_string(),
         });
-    }
-    Ok(Some(serialized))
+    };
+    let content_ref = match source_kind {
+        "document" => {
+            let Some(source_path) = fields.get("source_path") else {
+                return Err(RuntimeError::MissingReplayMetadata {
+                    block_id: validated.hash.to_string(),
+                });
+            };
+            ContentRef::Document {
+                path: source_path.into(),
+            }
+        }
+        "email" => {
+            let Some(email_artifact_ref) = fields.get("email_artifact_ref") else {
+                return Err(RuntimeError::MissingReplayMetadata {
+                    block_id: validated.hash.to_string(),
+                });
+            };
+            let Some(chunk_index) = fields
+                .get("chunk_index")
+                .and_then(|value| value.parse().ok())
+            else {
+                return Err(RuntimeError::MissingReplayMetadata {
+                    block_id: validated.hash.to_string(),
+                });
+            };
+            ContentRef::EmailChunk {
+                email_artifact_ref: email_artifact_ref.clone(),
+                chunk_index,
+            }
+        }
+        _ => return Ok(None),
+    };
+
+    Ok(Some((
+        IndexItem {
+            metadata: entry.metadata.clone(),
+            content_ref,
+        },
+        entry.embedding.clone(),
+    )))
 }
 
-fn make_status_observer(progress: ProgressReporter) -> IndexingStatusObserver {
+fn make_status_observer(progress: ProgressReporter) -> StreamingIndexingStatusObserver {
     Arc::new(move |status| {
         report_progress(&progress, format_indexing_status(status));
     })
 }
 
-fn format_indexing_status(status: IndexingStatus) -> String {
+fn format_indexing_status(status: StreamingIndexingStatus) -> String {
     let elapsed_ms = status.elapsed.as_millis();
     match (status.phase, status.state) {
-        (IndexingPhase::ParentLayerClustering, IndexingStatusState::Started) => format!(
-            "Clustering layer {} started for {} child block(s)",
-            status.layer_index, status.child_count
+        (
+            StreamingIndexingPhase::TrainingPass { pass_number },
+            StreamingIndexingStatusState::Started,
+        ) => format!(
+            "Training pass {pass_number} started for {} item(s)",
+            status.item_count
         ),
-        (IndexingPhase::ParentLayerClustering, IndexingStatusState::InProgress) => format!(
-            "Clustering layer {} still running after {} ms for {} child block(s)",
-            status.layer_index, elapsed_ms, status.child_count
+        (
+            StreamingIndexingPhase::TrainingPass { pass_number },
+            StreamingIndexingStatusState::InProgress,
+        ) => format!(
+            "Training pass {pass_number} still running after {elapsed_ms} ms for {} item(s)",
+            status.item_count
         ),
-        (IndexingPhase::ParentLayerClustering, IndexingStatusState::Completed) => format!(
-            "Clustering layer {} completed in {} ms: {} output group(s)",
-            status.layer_index,
-            elapsed_ms,
-            status.output_count.unwrap_or_default()
+        (
+            StreamingIndexingPhase::TrainingPass { pass_number },
+            StreamingIndexingStatusState::Completed,
+        ) => format!(
+            "Training pass {pass_number} completed in {elapsed_ms} ms for {} item(s)",
+            status.item_count
         ),
-        (IndexingPhase::ParentLayerClustering, IndexingStatusState::Failed) => format!(
-            "Clustering layer {} failed after {} ms: {}",
-            status.layer_index,
-            elapsed_ms,
+        (
+            StreamingIndexingPhase::TrainingPass { pass_number },
+            StreamingIndexingStatusState::Failed,
+        ) => format!(
+            "Training pass {pass_number} failed after {elapsed_ms} ms: {}",
             status.error.unwrap_or_else(|| "unknown error".into())
         ),
-        (IndexingPhase::ParentLayerMaterialization, IndexingStatusState::Completed) => format!(
-            "Materialized parent layer {} in {} ms: {} block(s)",
-            status.layer_index,
-            elapsed_ms,
-            status.output_count.unwrap_or_default()
+        (StreamingIndexingPhase::LeafMaterialization, StreamingIndexingStatusState::Started) => {
+            format!(
+                "Leaf materialization started for {} item(s)",
+                status.item_count
+            )
+        }
+        (StreamingIndexingPhase::LeafMaterialization, StreamingIndexingStatusState::InProgress) => {
+            format!(
+                "Leaf materialization still running after {elapsed_ms} ms for {} item(s)",
+                status.item_count
+            )
+        }
+        (StreamingIndexingPhase::LeafMaterialization, StreamingIndexingStatusState::Completed) => {
+            format!(
+                "Leaf materialization completed in {elapsed_ms} ms for {} item(s)",
+                status.item_count
+            )
+        }
+        (StreamingIndexingPhase::LeafMaterialization, StreamingIndexingStatusState::Failed) => {
+            format!(
+                "Leaf materialization failed after {elapsed_ms} ms: {}",
+                status.error.unwrap_or_else(|| "unknown error".into())
+            )
+        }
+        (StreamingIndexingPhase::FirstLayerClustering, StreamingIndexingStatusState::Started) => {
+            format!(
+                "Clustering layer 0 started for {} child block(s)",
+                status.item_count
+            )
+        }
+        (
+            StreamingIndexingPhase::FirstLayerClustering,
+            StreamingIndexingStatusState::InProgress,
+        ) => format!(
+            "Clustering layer 0 still running after {elapsed_ms} ms for {} child block(s)",
+            status.item_count
         ),
-        (IndexingPhase::ParentLayerMaterialization, IndexingStatusState::Failed) => format!(
-            "Materializing parent layer {} failed after {} ms: {}",
-            status.layer_index,
-            elapsed_ms,
+        (StreamingIndexingPhase::FirstLayerClustering, StreamingIndexingStatusState::Completed) => {
+            format!(
+                "Clustering layer 0 completed in {elapsed_ms} ms for {} child block(s)",
+                status.item_count
+            )
+        }
+        (StreamingIndexingPhase::FirstLayerClustering, StreamingIndexingStatusState::Failed) => {
+            format!(
+                "Clustering layer 0 failed after {elapsed_ms} ms: {}",
+                status.error.unwrap_or_else(|| "unknown error".into())
+            )
+        }
+        (
+            StreamingIndexingPhase::HigherLayerClustering { layer_index },
+            StreamingIndexingStatusState::Started,
+        ) => format!(
+            "Clustering layer {layer_index} started for {} child block(s)",
+            status.item_count
+        ),
+        (
+            StreamingIndexingPhase::HigherLayerClustering { layer_index },
+            StreamingIndexingStatusState::InProgress,
+        ) => format!(
+            "Clustering layer {layer_index} still running after {elapsed_ms} ms for {} child block(s)",
+            status.item_count
+        ),
+        (
+            StreamingIndexingPhase::HigherLayerClustering { layer_index },
+            StreamingIndexingStatusState::Completed,
+        ) => format!(
+            "Clustering layer {layer_index} completed in {elapsed_ms} ms for {} child block(s)",
+            status.item_count
+        ),
+        (
+            StreamingIndexingPhase::HigherLayerClustering { layer_index },
+            StreamingIndexingStatusState::Failed,
+        ) => format!(
+            "Clustering layer {layer_index} failed after {elapsed_ms} ms: {}",
             status.error.unwrap_or_else(|| "unknown error".into())
         ),
-        (IndexingPhase::ParentLayerMaterialization, IndexingStatusState::Started)
-        | (IndexingPhase::ParentLayerMaterialization, IndexingStatusState::InProgress) => format!(
-            "Materializing parent layer {} after {} ms",
-            status.layer_index, elapsed_ms
+        (
+            StreamingIndexingPhase::LayerMaterialization { layer_index },
+            StreamingIndexingStatusState::Completed,
+        ) => format!(
+            "Materialized parent layer {layer_index} in {elapsed_ms} ms: {} block(s)",
+            status.item_count
         ),
+        (
+            StreamingIndexingPhase::LayerMaterialization { layer_index },
+            StreamingIndexingStatusState::Failed,
+        ) => format!(
+            "Materializing parent layer {layer_index} failed after {elapsed_ms} ms: {}",
+            status.error.unwrap_or_else(|| "unknown error".into())
+        ),
+        (
+            StreamingIndexingPhase::LayerMaterialization { layer_index },
+            StreamingIndexingStatusState::Started,
+        )
+        | (
+            StreamingIndexingPhase::LayerMaterialization { layer_index },
+            StreamingIndexingStatusState::InProgress,
+        ) => format!("Materializing parent layer {layer_index} after {elapsed_ms} ms"),
     }
 }
 
 fn report_progress(progress: &ProgressReporter, message: String) {
     progress.as_ref()(message);
+}
+
+fn hash_embedding_input(input: &EmbeddingInput) -> BlockHash {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(input.media_type.as_bytes());
+    digest.update([0]);
+    digest.update(&input.body);
+    BlockHash::from_bytes(digest.finalize().into())
 }
 
 fn placeholder_root_id() -> String {
@@ -538,12 +855,6 @@ fn persist_staged_blocks(
         }
     }
     Ok(())
-}
-
-fn unique_serialized_blocks_by_hash(mut blocks: Vec<SerializedBlock>) -> Vec<SerializedBlock> {
-    blocks.sort_by(|left, right| left.hash.as_bytes().cmp(right.hash.as_bytes()));
-    blocks.dedup_by(|left, right| left.hash == right.hash);
-    blocks
 }
 
 pub fn write_summary_file(path: &Path, summary: &BatchSummary) -> Result<(), RuntimeError> {
@@ -778,7 +1089,7 @@ mod tests {
         assert!(
             progress
                 .iter()
-                .any(|line| line.contains("parent block(s); 1 staged block(s) remain"))
+                .any(|line| line.contains("Streaming training complete"))
         );
         server.join();
     }

@@ -3,9 +3,10 @@
 ## Status
 
 Phase 2 validation patch for the approved email-artifact, chunk-level
-indexing, local filesystem block-store interoperability, incremental
-delegated indexing, stage-selectable execution, standalone clustering input
-discovery, clustering-status observability, and layer-parallel
+indexing, local filesystem block-store interoperability, replay-based
+streaming delegated indexing, stage-selectable execution, standalone
+clustering input discovery, streaming-status observability, replay-stable
+fingerprinting, and layer-parallel
 block-construction evolution in
 `docs/specs/lexonarchivebuilder-indexer/requirements.md` and
 `docs/specs/lexonarchivebuilder-indexer/design.md`.
@@ -14,15 +15,15 @@ block-construction evolution in
 
 These validation entries define the expected conformance surface for the
 LexonArchiveBuilder-owned indexer boundary, including local filesystem block-store
-interoperability, incremental delegated indexing, stage-selectable execution,
-standalone clustering input discovery, batch-progress observability,
-clustering-status observability, and leaf-layer parallel block scheduling in
-the local/testing profile.
+interoperability, replay-based streaming delegated indexing, stage-selectable
+execution, standalone clustering input discovery, batch-progress
+observability, streaming-status observability, replay-stable fingerprinting,
+and leaf-layer parallel block scheduling in the local/testing profile.
 
 This package validates LexonArchiveBuilder's batch contract, adapter selection, and
 delegated use of LexonGraph interfaces. It does not redefine validation already
-owned by LexonGraph for `lexongraph-indexer`, `BlockStore`, or
-`EmbeddingProvider`.
+owned by LexonGraph for `lexongraph-streaming-indexer`,
+`lexongraph-streaming-clustering`, `BlockStore`, or `EmbeddingProvider`.
 
 ## Validation Entries
 
@@ -54,7 +55,8 @@ Submit a batch containing representative mailbox and document-collection items.
 
 **Pass condition:** LexonArchiveBuilder transforms each batch element into an
 application-defined content reference and delegates indexing through
-`lexongraph-indexer` rather than implementing an in-repo indexing algorithm.
+`lexongraph-streaming-indexer` rather than implementing an in-repo indexing
+algorithm.
 Mailbox inputs are expanded into LexonArchiveBuilder-owned artifacts and delegated
 chunk-sized email items before delegated indexing, while document items remain
 compatible with the same collection-oriented batch contract.
@@ -67,10 +69,10 @@ DSG-LFI-003, DSG-LFI-004
 Inspect the delegated indexing orchestration for a representative mailbox
 batch.
 
-**Pass condition:** LexonArchiveBuilder uses the upstream incremental delegated
-indexing path to construct and persist delegated indexing output as work
-advances, rather than depending exclusively on a single terminal one-shot
-indexing call after all mailbox expansion completes.
+**Pass condition:** LexonArchiveBuilder uses the upstream replay-based streaming
+indexing path, including at least one training pass, explicit training
+completion, and final materialization replay, while preserving the approved
+repository stage contract rather than exposing raw upstream lifecycle phases.
 
 **Traces to:** RQ-INDEXER-003A, DSG-LFI-001A
 
@@ -105,25 +107,39 @@ Run the ingestion-plus-embedding stage without the clustering-plus-block-
 assembly stage for a representative mailbox batch.
 
 **Pass condition:** LexonArchiveBuilder expands mailbox inputs, persists the resulting
-artifacts and delegated leaf output, does not require clustering or parent
-assembly in the same invocation, and still returns the existing `BatchSummary`
-shape.
+artifacts plus replay-safe delegated staging needed for a later streaming
+replay, does not require clustering or higher-layer finalization in the same
+invocation, and still returns the existing `BatchSummary` shape.
 
-**Traces to:** RQ-INDEXER-003A, RQ-INDEXER-003D, DSG-LFI-001A, DSG-LFI-001D
+**Traces to:** RQ-INDEXER-003A, RQ-INDEXER-003D, DSG-LFI-001A, DSG-LFI-001D,
+DSG-LFI-001F
 
 ### VAL-LFI-002I
 
 Run the clustering-plus-block-assembly stage against a configured block store
-that already contains representative delegated blocks and an empty request item
-collection.
+that already contains representative delegated blocks, replay metadata, and an
+empty request item collection.
 
 **Pass condition:** LexonArchiveBuilder iterates all clustering-eligible blocks exposed
 by the upstream block-iteration contract for the configured store, excludes
-stored artifacts outside that upstream input surface, and performs clustering
-or block assembly without requiring a prior LexonArchiveBuilder summary manifest.
+stored artifacts outside that upstream input surface, reconstructs the
+deterministic replay input needed by the streaming indexer, and performs
+clustering or block assembly without requiring a prior LexonArchiveBuilder
+summary manifest.
 
-**Traces to:** RQ-INDEXER-002, RQ-INDEXER-003E, RQ-INDEXER-010A,
-DSG-LFI-001E
+**Traces to:** RQ-INDEXER-002, RQ-INDEXER-003E, RQ-INDEXER-004F,
+RQ-INDEXER-010A, DSG-LFI-001E, DSG-LFI-001F
+
+### VAL-LFI-002J
+
+Compare a representative full-pipeline run with an equivalent split-stage run.
+
+**Pass condition:** the split-stage path reconstructs the same logical replay
+item order and fingerprint inputs used by the full-pipeline path, so the
+streaming indexer accepts both executions without replay-mismatch failures and
+both executions remain contract-equivalent at the LexonArchiveBuilder boundary.
+
+**Traces to:** RQ-INDEXER-003A, RQ-INDEXER-004F, DSG-LFI-001A, DSG-LFI-001F
 
 ### VAL-LFI-002A
 
@@ -183,10 +199,12 @@ Exercise the LexonArchiveBuilder content-resolution adapter with resolvable and
 unresolvable content references.
 
 **Pass condition:** successful resolution produces the `Content` shape expected
-by `lexongraph_indexer::ContentResolver<R>`, and failures surface through the
-delegated indexing error path rather than reporting success.
+by `lexongraph_streaming_indexer::ContentResolver<R>`, successful fingerprinting
+produces a stable replay identity for the same logical item, and failures
+surface through the delegated indexing error path rather than reporting
+success.
 
-**Traces to:** RQ-INDEXER-004, DSG-LFI-004
+**Traces to:** RQ-INDEXER-004, RQ-INDEXER-004F, DSG-LFI-004, DSG-LFI-004G
 
 ### VAL-LFI-004
 
@@ -279,9 +297,10 @@ mailbox-processing and delegated-indexing steps.
 
 **Pass condition:** the normal batch log stream reports forward progress before
 the final summary, including mailbox-processing visibility plus delegated
-indexing visibility and callback-driven clustering visibility when the selected
-stage includes clustering, so an operator can distinguish an active run from a
-hung run without consulting a separate control-plane service.
+indexing visibility and observer-driven streaming visibility across training
+and finalization when the selected stage includes clustering, so an operator
+can distinguish an active run from a hung run without consulting a separate
+control-plane service.
 
 **Traces to:** RQ-INDEXER-008B, DSG-LFI-002A
 
@@ -314,8 +333,9 @@ Inspect the repository's indexer specification package against upstream
 LexonGraph contracts.
 
 **Pass condition:** the package remains subordinate to
-`lexongraph-indexer`, `lexongraph-block-store`, and
-`lexongraph-embeddings-trait`, and does not redefine their public semantics.
+`lexongraph-streaming-indexer`, `lexongraph-streaming-clustering`,
+`lexongraph-block-store`, and `lexongraph-embeddings-trait`, and does not
+redefine their public semantics.
 
 **Traces to:** RQ-INDEXER-010A, DSG-LFI-001, DSG-LFI-011
 

@@ -2,21 +2,21 @@
 
 ## Document Status
 
-- **Phase:** Phase 2 - Design and Validation
-- **Status:** Approved requirements patch being propagated into design and validation
-- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, incremental delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-status observability, and layer-parallel block-construction evolution
+- **Phase:** Phase 2 - Specification Changes
+- **Status:** Approved streaming-indexer migration requirements patch being propagated into design and validation
+- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, streaming-status observability, and layer-parallel block-construction evolution
 
 ## USER-REQUEST
 
 - **UR-1 [KNOWN]:** Create specs under `docs/specs/lexonarchivebuilder-indexer/{requirements|design|validation}.md`.
 - **UR-2 [KNOWN]:** The first requirement spec is for the indexer.
-- **UR-3 [KNOWN]:** LexonArchiveBuilder does not perform indexing itself. It delegates indexing and index creation to the `lexongraph-indexer` crate and provides concrete implementations for content resolution and block storage integration.
+- **UR-3 [KNOWN]:** LexonArchiveBuilder does not perform indexing itself. It delegates indexing and index creation to LexonGraph indexing crates and provides concrete implementations for content resolution and block storage integration.
 - **UR-4 [KNOWN]:** The indexer runs as a Linux Docker container in batch mode.
 - **UR-5 [KNOWN]:** A batch accepts a collection of items to index, such as mailboxes and RFCs.
 - **UR-6 [KNOWN]:** The resulting blocks are stored either on the local filesystem or in Azure Blob Storage.
 - **UR-7 [KNOWN]:** Embeddings are obtained through an OpenAI-compatible HTTP embedding API, targeting either a local STAPI container or Azure OpenAI.
 - **UR-8 [KNOWN]:** Batch and recovery behavior are owned by the LexonGraph API itself; produced blocks are immutable and hash-addressed, so reruns are idempotent.
-- **UR-9 [KNOWN]:** The delegated indexer crate defines `ContentResolver<R>` and consumes `BlockStore` from `lexongraph-block-store` plus `EmbeddingProvider` from `lexongraph-embeddings-trait`.
+- **UR-9 [KNOWN]:** The delegated streaming indexer crate defines `ContentResolver<R>`, requires deterministic content fingerprints for replay validation, and consumes `BlockStore` from `lexongraph-block-store` plus `EmbeddingProvider` from `lexongraph-embeddings-trait`.
 - **UR-10 [KNOWN]:** Implement the minimal viable product of the `lexonarchivebuilder-indexer` feature using `docs/specs/lexonarchivebuilder-indexer/*` as the source of truth.
 - **UR-11 [KNOWN]:** The first MVP implementation must support both initial content classes already named by the spec: mailboxes and document collections.
 - **UR-12 [KNOWN]:** The first MVP implementation only needs an executable local/testing profile using local filesystem storage and a local embedding service.
@@ -38,7 +38,7 @@
 - **UR-28 [KNOWN]:** It is acceptable for this change to require a fresh or rebuilt local block store; continued read compatibility with blocks written by the superseded custom local layout is not required.
 - **UR-29 [KNOWN]:** Mailbox batch inputs must accept mailbox source files ending in `.mail` as well as `.mbox`.
 - **UR-30 [KNOWN]:** For this increment, mailbox source compatibility should be limited to exactly `.mail` and `.mbox` rather than broadened to arbitrary mailbox archive extensions.
-- **UR-31 [KNOWN]:** LexonGraph indexer APIs have been updated to support incremental indexing, and LexonArchiveBuilder should switch from the current one-shot delegated indexing path to those incremental APIs.
+- **UR-31 [KNOWN]:** LexonGraph indexing APIs have been replaced by a replay-based streaming indexer lifecycle, and LexonArchiveBuilder should switch from the current delegated indexing path to that streaming surface.
 - **UR-32 [KNOWN]:** LexonArchiveBuilder should emit visible progress logs while mailboxes are processed and delegated items are indexed so operators can distinguish forward progress from a hung batch.
 - **UR-33 [INFERRED]:** Progress reporting should stay on the existing batch-runtime logging surface rather than introducing a separate control-plane or telemetry service for this increment.
 - **UR-34 [KNOWN]:** Processing of both leaf and node blocks may occur concurrently within a construction layer; synchronization is only required across layers.
@@ -48,16 +48,22 @@
 - **UR-38 [KNOWN]:** Provide a command-line option to control which indexing stage runs.
 - **UR-39 [KNOWN]:** Allow callers to run only mailbox ingestion plus embedding generation or only clustering and block assembly.
 - **UR-40 [KNOWN]:** Standalone clustering should examine all clustering-eligible blocks currently available in the configured block store by using the new LexonGraph block-iteration API.
-- **UR-41 [KNOWN]:** LexonGraph clustering now exposes a callback trait for status updates, and LexonArchiveBuilder should implement that callback seam so slow clustering work can be monitored.
+- **UR-41 [KNOWN]:** LexonGraph streaming indexing now exposes a status-observer seam across training and finalization, and LexonArchiveBuilder should project that visibility onto its runtime progress surface so slow indexing work can be monitored.
 - **UR-42 [KNOWN]:** Stage selection should be exposed on both the CLI and the `BatchRequest` contract rather than being CLI-only.
 - **UR-43 [KNOWN]:** An ingestion-and-embedding-only run should preserve the existing `BatchSummary` contract rather than introducing a stage-specific partial summary shape.
+- **UR-44 [KNOWN]:** Update the LexonGraph Rust crates to the latest version, which contains a significant API change.
+- **UR-45 [KNOWN]:** Rebuild the LexonArchiveBuilder indexer code to use the new LexonGraph streaming indexer.
+- **UR-46 [KNOWN]:** Preserve the current external stage contract (`full`, `ingestion+embedding`, `clustering+block-assembly`) and adapt it internally to the streaming lifecycle.
+- **UR-47 [KNOWN]:** Preserve current MCP search and retrieval behavior for already-indexed content; required changes should stay confined to indexing-time orchestration and its tests.
+- **UR-48 [KNOWN]:** The new LexonGraph streaming indexer exposes a caller-visible replay lifecycle: one or more full training passes, explicit training completion, then final materialization replay.
+- **UR-49 [INFERRED]:** LexonArchiveBuilder must preserve deterministic delegated item ordering and stable content fingerprints across streaming passes and finalization replay.
 
 ## Change Manifest
 
 | ID | Type | Summary | Traceability |
 |---|---|---|---|
 | CM-INDEXER-001 | Add | Introduce the first structured requirements artifact for the LexonArchiveBuilder indexer boundary | UR-1, UR-2 |
-| CM-INDEXER-002 | Add | Define LexonArchiveBuilder as an orchestration and adapter layer around `lexongraph-indexer`, not an indexing engine | UR-3 |
+| CM-INDEXER-002 | Add | Define LexonArchiveBuilder as an orchestration and adapter layer around LexonGraph indexing crates, not an indexing engine | UR-3 |
 | CM-INDEXER-003 | Add | Define batch-container execution, supported initial content inputs, storage targets, and embedding-provider targets | UR-4, UR-5, UR-6, UR-7 |
 | CM-INDEXER-004 | Add | Capture invariants around delegated idempotence, immutable blocks, and separation from MCP search-serving behavior | UR-8 |
 | CM-INDEXER-005 | Revise | Narrow the first in-repo MVP realization to an end-to-end local/testing profile while preserving production extensibility boundaries | UR-10, UR-12, UR-13 |
@@ -70,7 +76,7 @@
 | CM-INDEXER-012 | Revise | Require the local/testing filesystem-backed block-store realization to stay interoperable with LexonGraph filesystem store tooling and naming/layout expectations | UR-26, UR-27 |
 | CM-INDEXER-013 | Add | Explicitly allow the local/testing filesystem store transition to require a fresh or rebuilt local store rather than preserving reads from the superseded custom layout | UR-28 |
 | CM-INDEXER-014 | Revise | Expand mailbox source compatibility so mailbox batch items may reference `.mail` or `.mbox` files without widening the first increment to arbitrary archive extensions | UR-29, UR-30 |
-| CM-INDEXER-015 | Revise | Require LexonArchiveBuilder to adopt LexonGraph's incremental delegated indexing APIs instead of relying only on the one-shot indexing call | UR-31 |
+| CM-INDEXER-015 | Revise | Require LexonArchiveBuilder to adopt LexonGraph's replay-based streaming indexing APIs instead of relying on the retired one-shot or pre-streaming delegated indexing surfaces | UR-31, UR-48 |
 | CM-INDEXER-016 | Add | Require observable batch-progress logging for mailbox expansion and delegated indexing progress without introducing a new control-plane surface | UR-32, UR-33 |
 | CM-INDEXER-017 | Revise | Allow delegated leaf-block work to proceed concurrently within the same construction layer while preserving cross-layer synchronization and recording higher-layer concurrency as future work | UR-34, UR-36, UR-37 |
 | CM-INDEXER-018 | Add | Require an administrator-defined concurrency budget for layer-parallel block processing, defaulting to one half of detected physical CPUs with a minimum of one core | UR-35 |
@@ -78,8 +84,12 @@
 | CM-INDEXER-020 | Revise | Extend the batch entrypoint contract to carry stage selection on both the CLI and `BatchRequest` while preserving the existing `BatchSummary` shape | UR-38, UR-42, UR-43 |
 | CM-INDEXER-021 | Revise | Permit clustering-only requests to use an empty item collection because standalone clustering discovers its input from the configured block store rather than from request-supplied sources | UR-39, UR-40 |
 | CM-INDEXER-022 | Add | Require standalone clustering to iterate all clustering-eligible blocks surfaced by the LexonGraph block-iteration API for the configured block store rather than depending on a prior LexonArchiveBuilder summary manifest | UR-39, UR-40 |
-| CM-INDEXER-023 | Revise | Extend observable progress requirements to include clustering and block-assembly status updates through the upstream callback seam on the normal runtime progress surface | UR-41 |
+| CM-INDEXER-023 | Revise | Extend observable progress requirements to include streaming lifecycle status updates on the normal runtime progress surface | UR-41, UR-48 |
 | CM-INDEXER-024 | Add | Keep stage semantics environment-neutral and content-type-neutral so future content types can participate without reshaping the batch contract | UR-39, UR-42 |
+| CM-INDEXER-025 | Revise | Migrate the delegated indexing boundary from the retired `lexongraph-indexer` surface to the replay-based `lexongraph-streaming-indexer` surface while preserving LexonArchiveBuilder's adapter-orchestrator role | UR-44, UR-45, UR-48 |
+| CM-INDEXER-026 | Add | Preserve the current external stage contract and MCP search-serving behavior while adapting the internals to the new streaming lifecycle | UR-46, UR-47 |
+| CM-INDEXER-027 | Add | Require deterministic replay inputs, including stable delegated item ordering and content fingerprints, so streaming passes and finalization remain valid and repeatable | UR-45, UR-48, UR-49 |
+| CM-INDEXER-028 | Revise | Consume upstream streaming status notifications on the existing runtime progress surface instead of relying on the superseded incremental-indexer callback seam | UR-41, UR-45, UR-48 |
 
 ## Before / After
 
@@ -91,7 +101,7 @@
 ### BA-INDEXER-002
 
 - **Before [KNOWN]:** `README.md` described LexonArchiveBuilder as an indexer at a high level, but did not distinguish whether indexing logic lived in-repo or was delegated externally.
-- **After [KNOWN]:** The requirements define that LexonArchiveBuilder delegates indexing and index creation to `lexongraph-indexer` and is responsible for supplying environment-specific integrations around that crate.
+- **After [KNOWN]:** The requirements define that LexonArchiveBuilder delegates indexing and index creation to LexonGraph indexing crates and is responsible for supplying environment-specific integrations around that boundary.
 
 ### BA-INDEXER-003
 
@@ -121,7 +131,7 @@
 ### BA-INDEXER-008
 
 - **Before [KNOWN]:** A mailbox batch item was understood as one embedding unit, which implied embedding the entire `.mbox` body as one vector through the delegated indexer contract.
-- **After [KNOWN]:** The requirements define mailbox inputs as ingestion sources that LexonArchiveBuilder expands into normalized email artifacts and chunk-level embedding units before delegating indexing to `lexongraph-indexer`.
+- **After [KNOWN]:** The requirements define mailbox inputs as ingestion sources that LexonArchiveBuilder expands into normalized email artifacts and chunk-level embedding units before delegating indexing to the upstream LexonGraph indexing boundary.
 
 ### BA-INDEXER-009
 
@@ -155,8 +165,8 @@
 
 ### BA-INDEXER-015
 
-- **Before [KNOWN]:** LexonArchiveBuilder delegated indexing through a single `lexongraph-indexer` one-shot batch call after fully expanding the request, so the repository requirements did not capture use of LexonGraph's newer incremental indexing APIs.
-- **After [KNOWN]:** The requirements now define incremental delegated indexing as the preferred LexonGraph integration path so LexonArchiveBuilder can hand off work progressively while remaining subordinate to upstream indexing contracts.
+- **Before [KNOWN]:** The requirements targeted a pre-streaming delegated indexing path and did not account for LexonGraph's newer replay-based streaming lifecycle.
+- **After [KNOWN]:** The requirements now define replay-based streaming delegated indexing as the preferred LexonGraph integration path so LexonArchiveBuilder can satisfy the latest upstream APIs while remaining subordinate to upstream indexing contracts.
 
 ### BA-INDEXER-016
 
@@ -195,13 +205,33 @@
 
 ### BA-INDEXER-023
 
-- **Before [KNOWN]:** Observable progress covered mailbox processing and delegated indexing progress, but the requirements did not define a clustering callback seam or a unified progress stream across full-pipeline runs.
-- **After [KNOWN]:** The requirements define clustering and block-assembly visibility through the upstream clustering status-callback trait and require those events to appear on the same normal runtime progress surface as mailbox and delegated-indexing progress.
+- **Before [KNOWN]:** Observable progress covered mailbox processing and delegated indexing progress, but the requirements did not define a streaming status-observer seam or a unified progress stream across full-pipeline runs.
+- **After [KNOWN]:** The requirements define streaming lifecycle visibility through the upstream status-observer seam and require those events to appear on the same normal runtime progress surface as mailbox and delegated-indexing progress.
 
 ### BA-INDEXER-024
 
 - **Before [KNOWN]:** The requirements did not state whether stage selection should remain generic across content types or whether stage-specific runs would require a new result contract.
 - **After [KNOWN]:** The requirements define stage selection in terms of pipeline phases rather than mailbox-specific behavior and preserve the existing `BatchSummary` contract instead of introducing a stage-specific partial schema.
+
+### BA-INDEXER-025
+
+- **Before [KNOWN]:** The requirements targeted the older `lexongraph-indexer` delegated indexing surface and did not account for the new replay-based streaming lifecycle now exposed by LexonGraph.
+- **After [KNOWN]:** The requirements target `lexongraph-streaming-indexer` as the delegated indexing boundary and require LexonArchiveBuilder to adapt its orchestration to that replay-based lifecycle without taking ownership of upstream indexing semantics.
+
+### BA-INDEXER-026
+
+- **Before [KNOWN]:** The requirements did not state whether the upstream streaming lifecycle could alter the caller-visible stage contract.
+- **After [KNOWN]:** The requirements explicitly preserve the existing external stage contract and keep the streaming lifecycle as an internal adaptation detail.
+
+### BA-INDEXER-027
+
+- **Before [KNOWN]:** The requirements did not define a repository-owned obligation to preserve deterministic delegated item ordering and stable content fingerprints across repeated upstream passes.
+- **After [KNOWN]:** The requirements now constrain LexonArchiveBuilder to provide replay-safe delegated inputs so the streaming indexer can validate training and finalization replays without changing the batch contract.
+
+### BA-INDEXER-028
+
+- **Before [KNOWN]:** Observable progress requirements referenced the superseded incremental-indexer and clustering callback seams rather than the newer streaming status-observer surface.
+- **After [KNOWN]:** The requirements now define progress visibility in terms of the upstream streaming status observer while preserving one runtime-visible progress stream for local and production-shaped execution.
 
 ## Requirements
 
@@ -234,20 +264,21 @@ The batch indexer SHALL accept a collection of items to index rather than a sing
 
 #### RQ-INDEXER-003 - Delegated indexing engine
 
-LexonArchiveBuilder SHALL delegate indexing and index creation to the `lexongraph-indexer` crate.
+LexonArchiveBuilder SHALL delegate indexing and index creation to the `lexongraph-streaming-indexer` crate.
 
 - **Non-goal [KNOWN]:** LexonArchiveBuilder does not define or implement its own indexing algorithm in this scope.
-- **Traceability:** UR-3
+- **Traceability:** UR-3, UR-44, UR-45
 
-#### RQ-INDEXER-003A - Incremental delegated indexing
+#### RQ-INDEXER-003A - Replay-based streaming delegated indexing
 
-LexonArchiveBuilder SHALL adopt the incremental indexing APIs exposed by `lexongraph-indexer` when they satisfy the approved batch contract.
+LexonArchiveBuilder SHALL adapt the approved batch contract onto the replay-based streaming indexing APIs exposed by `lexongraph-streaming-indexer`.
 
-- **Required property [KNOWN]:** The delegated indexing flow must be able to hand off indexing work incrementally rather than depending exclusively on a single one-shot indexing call after the entire batch has been expanded.
-- **Stage decomposition [KNOWN]:** The approved incremental flow is decomposable into an ingestion-plus-embedding stage and a clustering-plus-block-assembly stage that may run together or separately without redefining the delegated indexing contract.
-- **Boundary [KNOWN]:** LexonArchiveBuilder still does not own index-construction semantics; it consumes upstream incremental APIs rather than reimplementing indexing behavior in-repo.
-- **Idempotence constraint [INFERRED]:** Adopting incremental delegated indexing must preserve the existing immutable, hash-addressed rerun expectations for unchanged content.
-- **Traceability:** UR-3, UR-8, UR-31, UR-39
+- **Required property [KNOWN]:** The delegated indexing flow must support the upstream lifecycle of one or more training passes, explicit training completion, and final materialization replay rather than depending on the superseded one-shot or pre-streaming incremental surface.
+- **External-contract stability [KNOWN]:** LexonArchiveBuilder SHALL preserve the current caller-visible stage contract (`full`, `ingestion+embedding`, `clustering+block-assembly`) and SHALL NOT expose the raw upstream streaming lifecycle directly on the CLI or `BatchRequest`.
+- **Replay obligation [KNOWN]:** LexonArchiveBuilder SHALL preserve a deterministic delegated item stream, including stable item ordering and replay identity, anywhere the upstream streaming lifecycle requires caller replay.
+- **Boundary [KNOWN]:** LexonArchiveBuilder still does not own index-construction semantics; it consumes upstream streaming APIs rather than reimplementing indexing behavior in-repo.
+- **Idempotence constraint [INFERRED]:** Adapting to replay-based streaming indexing must preserve the existing immutable, hash-addressed rerun expectations for unchanged content.
+- **Traceability:** UR-3, UR-8, UR-31, UR-45, UR-46, UR-48, UR-49
 
 #### RQ-INDEXER-003B - Layer-parallel delegated block processing
 
@@ -328,11 +359,11 @@ the configured `BlockStore` through the LexonGraph block-iteration API.
 
 #### RQ-INDEXER-004 - Content resolution integration
 
-LexonArchiveBuilder SHALL provide a concrete implementation of `lexongraph_indexer::ContentResolver<R>`.
+LexonArchiveBuilder SHALL provide a concrete implementation of `lexongraph_streaming_indexer::ContentResolver<R>`.
 
 - **Constraint [KNOWN]:** This integration is responsible for resolving requested source content for the batch's collection items.
-- **Email refinement [KNOWN]:** For mailbox-driven email indexing, LexonArchiveBuilder-owned preprocessing may materialize additional logical items such as normalized emails and chunks before the delegated resolver hands final embedding content to `lexongraph-indexer`.
-- **Traceability:** UR-3, UR-5, UR-9, UR-15
+- **Email refinement [KNOWN]:** For mailbox-driven email indexing, LexonArchiveBuilder-owned preprocessing may materialize additional logical items such as normalized emails and chunks before the delegated resolver hands final embedding content to `lexongraph-streaming-indexer`.
+- **Traceability:** UR-3, UR-5, UR-9, UR-15, UR-45
 
 #### RQ-INDEXER-004A - Normalized email artifact derivation
 
@@ -378,10 +409,19 @@ that makes it possible to determine which chunk is being processed or returned.
 - **Required property [KNOWN]:** The chunk locator must be derivable from the
   normalized email artifact reference plus chunk-local identity such as ordinal
   position and remain stable under a stable normalization and chunking policy.
-- **Integration boundary [KNOWN]:** Because `lexongraph-indexer` accepts
+- **Integration boundary [KNOWN]:** Because `lexongraph-streaming-indexer` accepts
   `metadata` plus an opaque `content_ref` rather than a first-class item-name
   field, LexonArchiveBuilder owns how this chunk locator is represented.
 - **Traceability:** UR-17, UR-23
+
+#### RQ-INDEXER-004F - Replay-stable content fingerprints
+
+LexonArchiveBuilder SHALL provide a deterministic content fingerprint for every delegated content reference used with the streaming indexer.
+
+- **Required property [KNOWN]:** The fingerprint for a delegated content reference must remain stable across every training pass and the final materialization replay for the same logical item.
+- **Email identity alignment [KNOWN]:** For email-derived chunk items, the fingerprint SHALL remain aligned with the normalized email artifact and stable chunk locator rather than with transient mailbox-processing state.
+- **Failure-safety implication [INFERRED]:** Replay or rerun validation failures caused by non-deterministic fingerprinting are specification violations rather than acceptable batch variability.
+- **Traceability:** UR-9, UR-16, UR-23, UR-45, UR-48, UR-49
 
 #### RQ-INDEXER-005 - Block storage integration
 
@@ -450,6 +490,7 @@ advances, and clustering or block assembly advances.
   visibility, indexed-item visibility, and clustering or block-assembly
   visibility so operators can tell that work is continuing before the final
   summary is emitted.
+- **Streaming lifecycle visibility [KNOWN]:** Progress output must remain meaningful across upstream training passes, training completion, and final materialization without requiring callers to understand raw upstream phase names.
 - **Surface [KNOWN]:** Progress output should be emitted on the normal
   batch-runtime log stream so local runs, Compose runs, and containerized
   production-style runs observe the same signal shape.
@@ -457,11 +498,11 @@ advances, and clustering or block assembly advances.
   full pipeline, progress remains one unified runtime-visible stream that spans
   the ingestion plus embedding phase and the clustering plus block-assembly
   phase in order.
-- **Callback integration [KNOWN]:** LexonArchiveBuilder SHALL implement the upstream
-  clustering status-callback trait and translate callback events onto the same
+- **Observer integration [KNOWN]:** LexonArchiveBuilder SHALL implement the upstream
+  streaming status-observer seam and translate observer events onto the same
   runtime progress surface used for mailbox and delegated-indexing progress.
 - **Non-goal [KNOWN]:** This requirement does not introduce a separate control-plane, metrics backend, or MCP-surface change.
-- **Traceability:** UR-32, UR-33, UR-41
+- **Traceability:** UR-32, UR-33, UR-41, UR-45, UR-48
 
 ### Boundary and Invariant Requirements
 
@@ -474,10 +515,10 @@ The indexer requirements SHALL remain limited to indexing-time orchestration and
 
 #### RQ-INDEXER-010A - Subordinate external contracts
 
-LexonArchiveBuilder SHALL remain subordinate to the public contracts owned by `lexongraph-indexer`, `lexongraph-block-store`, and `lexongraph-embeddings-trait` and SHALL NOT redefine their index-construction, block-identity, or embedding-contract semantics within this repository.
+LexonArchiveBuilder SHALL remain subordinate to the public contracts owned by `lexongraph-streaming-indexer`, `lexongraph-streaming-clustering`, `lexongraph-block-store`, and `lexongraph-embeddings-trait` and SHALL NOT redefine their index-construction, replay-validation, block-identity, or embedding-contract semantics within this repository.
 
 - **Rationale [KNOWN]:** Those semantics are already owned by the upstream LexonGraph crates and specifications.
-- **Traceability:** UR-3, UR-8, UR-9
+- **Traceability:** UR-3, UR-8, UR-9, UR-44, UR-45, UR-48
 
 #### RQ-INDEXER-010B - Local block-store tooling interoperability
 
@@ -500,7 +541,8 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 
 ## Out of Scope
 
-- Defining indexing algorithms internal to `lexongraph-indexer`
+- Defining indexing algorithms internal to LexonGraph indexing crates
+- Exposing the upstream streaming training/finalization lifecycle directly on the external CLI or `BatchRequest` contract in this increment
 - Redefining the public contracts of `ContentResolver<R>`, `BlockStore`, or `EmbeddingProvider`
 - Defining MCP query semantics or search ranking behavior
 - Re-specifying LexonGraph API batch recovery internals
@@ -521,7 +563,8 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 | Architecture remains extensible to future content types | Preserved | Collection-oriented input still covers both mailbox and document collections, and stage selection is defined in generic pipeline terms rather than mailbox-specific behavior |
 | Idempotence and recoverability stay aligned with underlying immutable block semantics | Preserved with clarified scope | Requirements extend hash-addressed identity expectations to normalized email artifacts and require clustering-only reruns over the same clustering-eligible block-store snapshot to remain semantically stable under unchanged upstream semantics |
 | Local development remains self-contained and batch-oriented | Preserved | Docker Compose is constrained to compose local dependencies around the batch container rather than changing the runtime model |
-| Long-running batches remain observable without adding a control plane | Preserved | Progress reporting remains on the existing batch-runtime log surface and now includes clustering callback visibility in addition to mailbox processing and delegated indexing visibility |
+| Long-running batches remain observable without adding a control plane | Preserved | Progress reporting remains on the existing batch-runtime log surface and now includes upstream streaming-status visibility in addition to mailbox processing and delegated indexing visibility |
+| Caller-visible indexing and MCP contracts remain stable across the upstream API migration | Preserved | The streaming lifecycle is constrained to an internal adaptation behind the existing stage surface and unchanged MCP retrieval semantics |
 | Clients are not forced to parse raw mailbox blobs for ordinary retrieval | Preserved | Indexed chunks must reference normalized email artifacts so retrieval can stay at chunk level or expand to full normalized email through repository-owned artifacts |
 | Storage abstraction count stays bounded across environments | Preserved | Requirements now reuse the environment-selected `BlockStore` abstraction family for indexed blocks, normalized email artifacts, and mailbox provenance artifacts rather than introducing a second storage stack |
 | Local filesystem block stores remain interoperable with LexonGraph tooling | Preserved | The local/testing profile is now constrained to LexonGraph's filesystem naming/layout contract so inspection tools can consume repository-produced local stores |
@@ -530,6 +573,9 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 ## Coverage Notes
 
 - **Covered sources [KNOWN]:**
+  - user request in this session: "update the LexonGraph rust crates. The latest version contains a significant api change. Rebuild the indexer code to use the new LexonGraph streaming indexer. Maintain other invariants, update tests. When done, branch, commit, push, pr"
+  - user clarification in this session selecting: "Preserve the current external stage contract (Recommended)"
+  - user clarification in this session selecting: "Yes, preserve MCP search/retrieval behavior (Recommended)"
   - user request in this session to adopt LexonGraph's incremental indexing APIs and emit visible mailbox/indexing progress during batch execution
   - user request in this session: "make it so this can work with .mail as well as .mbox"
   - user clarification in this session selecting: "Exactly `.mail` and `.mbox`"
@@ -542,13 +588,15 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
   - `crates/lexonarchivebuilder-indexer/src/mailbox.rs:24-31`
   - `crates/lexonarchivebuilder-indexer/src/mailbox.rs:157-176`
   - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
-    `crates/lexongraph-indexer/src/lib.rs:24-26`
+    `crates/lexongraph-streaming-indexer/src/lib.rs:5-8`
   - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
-    `crates/lexongraph-indexer/src/lib.rs:29-37`
+    `crates/lexongraph-streaming-indexer/src/lib.rs:92-119`
   - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
-    `crates/lexongraph-indexer/src/lib.rs:104-107`
+    `crates/lexongraph-streaming-indexer/src/lib.rs:202-219`
   - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
-    `crates/lexongraph-indexer/src/lib.rs:292-349`
+    `crates/lexongraph-streaming-indexer/src/lib.rs:499-507`
+  - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
+    `crates/lexongraph-streaming-indexer/src/lib.rs:799-807`
   - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
     `crates/lexongraph-block-store/src/lib.rs:28-32`
   - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
@@ -584,5 +632,6 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
   - Detailed Rust implementation file paths, crate manifests, Docker assets, and test artifacts, because this requirements document captures the semantic contract and leaves implementation realization to downstream design, validation, and code-review artifacts
   - Exact normalized email CBOR schema, exact duplicated chunk metadata list, and the specific chunking library choice, because those belong to downstream design and validation artifacts rather than requirements
   - The precise log-line schema, sink configuration, and per-item verbosity throttling policy for progress output, because those belong to downstream design and validation artifacts rather than requirements
+  - The exact mapping from repository stage modes to concrete upstream streaming pass counts, replay batching, and training-completion timing, because those belong to downstream design and validation artifacts rather than requirements
   - The exact configuration surface for the administrator-defined concurrency cap and the exact physical-CPU detection algorithm in containerized or quota-constrained environments, because those belong to downstream design and validation artifacts rather than requirements
   - The precise block-kind predicate used inside the upstream LexonGraph block-iteration API to determine clustering eligibility, because this requirements document constrains LexonArchiveBuilder to the upstream iteration contract without redefining LexonGraph-owned block semantics

@@ -8,7 +8,7 @@ use lexongraph_block::{
     Block, BlockHash, Content, EmbeddingSpec, LeafEntry, VERSION_1, build_leaf_block,
 };
 use lexongraph_block_store::{BlockStore, BlockStoreError};
-use lexongraph_indexer::{IndexItem, Metadata};
+use lexongraph_streaming_indexer::{IndexItem, Metadata};
 use mailparse::{MailHeaderMap, ParsedMail, parse_mail};
 use thiserror::Error;
 
@@ -20,7 +20,7 @@ const ARTIFACT_EMBEDDING_ENCODING: &str = "f32le";
 const ARTIFACT_MEDIA_TYPE_MAILBOX: &str = "application/mbox";
 const ARTIFACT_MEDIA_TYPE_NORMALIZED_EMAIL: &str =
     "application/vnd.lexonarchivebuilder.normalized-email+cbor";
-const CHUNK_MEDIA_TYPE: &str = "text/plain";
+pub(crate) const CHUNK_MEDIA_TYPE: &str = "text/plain";
 const NORMALIZED_EMAIL_SCHEMA_VERSION: u64 = 1;
 const MAX_CHUNK_CHARS: usize = 1_000;
 
@@ -139,7 +139,7 @@ pub(crate) fn expand_mailbox_item_with_stats(
             normalized_bytes,
         )?;
         let chunks = chunk_email_core(&normalized.body);
-        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+        for (chunk_index, _chunk) in chunks.into_iter().enumerate() {
             let chunk_locator = format!("{email_artifact_ref}:{chunk_index}");
             let chunk_metadata = build_chunk_metadata(
                 metadata,
@@ -152,9 +152,9 @@ pub(crate) fn expand_mailbox_item_with_stats(
             );
             items.push(IndexItem {
                 metadata: chunk_metadata,
-                content_ref: ContentRef::Inline {
-                    media_type: CHUNK_MEDIA_TYPE.to_string(),
-                    body: chunk.into_bytes(),
+                content_ref: ContentRef::EmailChunk {
+                    email_artifact_ref: email_artifact_ref.to_string(),
+                    chunk_index,
                 },
             });
         }
@@ -333,7 +333,7 @@ fn looks_like_reply_intro(line: &str) -> bool {
     lower.starts_with("on ") && lower.ends_with(" wrote:")
 }
 
-fn chunk_email_core(body: &str) -> Vec<String> {
+pub(crate) fn chunk_email_core(body: &str) -> Vec<String> {
     let units = sentence_units(body);
     if units.is_empty() {
         return vec![body.trim().to_string()];
@@ -660,6 +660,7 @@ mod tests {
     use super::*;
     use crate::config::{
         EmbeddingSpecConfig, EnvironmentConfig, ExecutionStage, LocalEmbeddingConfig,
+        metadata_to_text_map,
     };
     use lexongraph_block_store_fs::FilesystemBlockStore;
 
@@ -705,14 +706,17 @@ mod tests {
         assert!(metadata.contains_key("email_artifact_ref"));
         assert!(metadata.contains_key("chunk_locator"));
         match &items[0].content_ref {
-            ContentRef::Inline { media_type, body } => {
-                assert_eq!(media_type, CHUNK_MEDIA_TYPE);
+            ContentRef::EmailChunk {
+                email_artifact_ref,
+                chunk_index,
+            } => {
+                assert_eq!(chunk_index, &0);
                 assert_eq!(
-                    String::from_utf8(body.clone()).unwrap(),
-                    "This is the first sentence. This is the second sentence."
+                    email_artifact_ref,
+                    metadata.get("email_artifact_ref").unwrap()
                 );
             }
-            other => panic!("expected inline email content, got {other:?}"),
+            other => panic!("expected email chunk content ref, got {other:?}"),
         }
         assert_eq!(count_files_recursively(&dir.path().join("blocks")), 2);
     }
@@ -859,7 +863,10 @@ mod tests {
 
         assert_eq!(items.len(), 2);
         assert!(matches!(items[0].content_ref, ContentRef::Document { .. }));
-        assert!(matches!(items[1].content_ref, ContentRef::Inline { .. }));
+        assert!(matches!(
+            items[1].content_ref,
+            ContentRef::EmailChunk { .. }
+        ));
     }
 
     #[test]
@@ -897,16 +904,6 @@ mod tests {
         let body = first_preferred_body(&parsed).unwrap();
 
         assert_eq!(body, "f\u{fffd}o");
-    }
-
-    fn metadata_to_text_map(metadata: &Metadata) -> BTreeMap<String, String> {
-        metadata
-            .iter()
-            .filter_map(|(key, value)| match (key, value) {
-                (Value::Text(key), Value::Text(value)) => Some((key.clone(), value.clone())),
-                _ => None,
-            })
-            .collect()
     }
 
     fn count_files_recursively(root: &Path) -> usize {

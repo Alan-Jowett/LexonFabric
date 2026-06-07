@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use ciborium::Value;
 use clap::ValueEnum;
 use lexongraph_block::EmbeddingSpec;
-use lexongraph_indexer::{IndexItem, Metadata};
+use lexongraph_streaming_indexer::{IndexItem, Metadata};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -240,6 +240,16 @@ pub(crate) fn metadata_to_lexongraph(
     result
 }
 
+pub(crate) fn metadata_to_text_map(metadata: &Metadata) -> BTreeMap<String, String> {
+    metadata
+        .iter()
+        .filter_map(|(key, value)| match (key, value) {
+            (Value::Text(key), Value::Text(value)) => Some((key.clone(), value.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 fn default_block_size_target() -> usize {
     DEFAULT_BLOCK_SIZE_TARGET
 }
@@ -328,6 +338,7 @@ mod tests {
                 assert_eq!(path, &request_root.join(relative_document_path));
             }
             ContentRef::Inline { .. } => panic!("expected a document content ref"),
+            ContentRef::EmailChunk { .. } => panic!("expected a document content ref"),
         }
     }
 

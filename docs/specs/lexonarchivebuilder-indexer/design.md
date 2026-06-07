@@ -3,9 +3,10 @@
 ## Status
 
 Phase 2 specification patch for the approved email-artifact, chunk-level
-indexing, local filesystem block-store interoperability, incremental
-delegated indexing, stage-selectable execution, standalone clustering input
-discovery, clustering-status observability, and layer-parallel
+indexing, local filesystem block-store interoperability, replay-based
+streaming delegated indexing, stage-selectable execution, standalone
+clustering input discovery, streaming-status observability, replay-stable
+fingerprinting, and layer-parallel
 block-construction evolution in
 `docs/specs/lexonarchivebuilder-indexer/requirements.md`.
 
@@ -15,9 +16,10 @@ This document specifies the LexonArchiveBuilder-owned design for realizing the a
 indexer requirements, including the email-ingestion refinement from `.mail` and
 `.mbox` mailbox sources to normalized email artifacts and chunk-level embedding
 units plus the local filesystem block-store interoperability correction,
-incremental delegated indexing adoption, stage-selectable execution,
+replay-based streaming delegated indexing adoption, stage-selectable execution,
 standalone clustering input discovery, batch-progress observability,
-clustering-status observability, and layer-parallel delegated block
+streaming-status observability, replay-stable delegated item identity, and
+layer-parallel delegated block
 construction for the local/testing profile.
 
 This document is layered on top of:
@@ -25,7 +27,9 @@ This document is layered on top of:
 - `docs/specs/lexonarchivebuilder-indexer/requirements.md`
 - `README.md`
 - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
-  `crates/lexongraph-indexer/src/lib.rs`
+  `crates/lexongraph-streaming-indexer/src/lib.rs`
+- external LexonGraph repository source (not vendored in LexonArchiveBuilder):
+  `crates/lexongraph-streaming-clustering/src/lib.rs`
 - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
   `crates/lexongraph-block-store/src/lib.rs`
 - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
@@ -66,18 +70,18 @@ owned by LexonGraph and its subordinate crates.
 
 The LexonArchiveBuilder indexer design is intended to be:
 
-- an orchestration layer around `lexongraph-indexer`
+- an orchestration layer around `lexongraph-streaming-indexer`
 - explicit about ownership boundaries
 - stable across local and production environments
 - minimal and fully executable in the local/testing profile first
 - extensible to future content types
 - compatible with a Linux batch-container runtime
 - interoperable with LexonGraph-owned local block-store tooling
-- incremental-friendly at the delegated indexing boundary
+- replay-safe at the delegated indexing boundary
 - layer-parallel within one delegated construction layer
 - bounded by an administrator-controlled concurrency budget
 - stage-selectable at the same batch boundary across CLI and request-file use
-- observable during long-running mailbox batches and clustering work
+- observable during long-running mailbox batches and streaming finalization work
 - chunk-first for email retrieval while preserving full-message and source
   provenance artifacts
 
@@ -94,43 +98,47 @@ batch recovery semantics internal to the delegated LexonGraph stack.
 **Traces to:** RQ-INDEXER-001, RQ-INDEXER-003, RQ-INDEXER-008,
 RQ-INDEXER-010A
 
-### DSG-LFI-001A `Incremental delegated indexing seam`
+### DSG-LFI-001A `Replay-based streaming indexing seam`
 
-LexonArchiveBuilder realizes delegated indexing as a staged handoff to
-`lexongraph-indexer`'s incremental construction APIs rather than as a single
-terminal indexing call.
+LexonArchiveBuilder realizes delegated indexing as a repository-owned replay adapter over
+`lexongraph-streaming-indexer` rather than as a single terminal indexing call.
 
-That staged handoff is decomposable into two pipeline phases that may run
-consecutively in one invocation or separately under a caller-selected stage:
+That adapter preserves the approved repository stages while internally driving
+the upstream lifecycle in order:
 
-1. ingestion plus embedding generation for request-supplied items
-2. clustering plus block assembly over clustering-eligible blocks
+1. establish a deterministic delegated item stream for the selected logical
+   input set
+2. drive one or more training passes over that stream
+3. mark training complete
+4. drive the final materialization replay
 
-LexonArchiveBuilder still owns mailbox expansion, artifact storage, item shaping, and
-stage orchestration. The delegated indexer still owns block construction
-semantics, canonical block bytes, and branch-shaping behavior.
+The caller-visible `full pipeline`, `ingestion plus embedding generation only`,
+and `clustering plus block assembly only` modes remain repository contracts.
+The raw upstream training and finalization lifecycle is not surfaced directly on
+the CLI or `BatchRequest`.
 
-The design permits LexonArchiveBuilder to persist delegated leaf and parent blocks as
-work becomes available, while leaving final root determination to the upstream
-LexonGraph contract. The design also preserves the existing `BatchSummary`
-shape for the approved stage modes rather than introducing a separate
-stage-specific summary schema.
+LexonArchiveBuilder still owns mailbox expansion, artifact storage, replay
+preparation, item shaping, and stage orchestration. The delegated streaming
+indexer still owns block construction semantics, canonical block bytes, replay
+validation, and branch-shaping behavior.
+
+The design preserves the existing `BatchSummary` shape for the approved stage
+modes rather than introducing a separate stage-specific summary schema.
 
 **Traces to:** RQ-INDEXER-003A, RQ-INDEXER-003D, RQ-INDEXER-008,
 RQ-INDEXER-010A
 
 ### DSG-LFI-001B `Leaf-layer scheduling discipline`
 
-LexonArchiveBuilder realizes incremental delegated indexing with a layer-aware
+LexonArchiveBuilder realizes replay-based streaming delegated indexing with a layer-aware
 scheduler.
 
 Within the delegated leaf construction layer, ready leaf work items may
 execute concurrently. The scheduler treats completion of that leaf layer as the
 boundary that must be crossed before higher-layer parent construction begins.
 
-Higher-layer parent construction remains a single delegated
-`build_parent_blocks(...)` call per layer at the current public upstream API
-surface.
+Higher-layer parent construction remains bound to the public higher-layer
+materialization behavior exposed by the current upstream streaming API surface.
 
 This preserves the delegated LexonGraph ownership of canonical block bytes,
 parent-child structure, and final root determination while allowing LexonArchiveBuilder
@@ -197,6 +205,22 @@ repository-local per-run manifest.
 
 **Traces to:** RQ-INDEXER-003E, RQ-INDEXER-010A
 
+### DSG-LFI-001F `Replay staging for split-stage execution`
+
+Any stage that includes ingestion persists a replay-safe delegated item record
+or equivalent repository-owned staging artifact that captures deterministic item
+ordering, content-reference identity, and fingerprint inputs needed for later
+streaming replays.
+
+A clustering-only invocation reconstructs its replay batches from stored
+clustering-eligible inputs plus that replay metadata rather than from
+request-supplied collection items.
+
+This design fixes the replay-safety contract but does not freeze a specific
+serialization schema for the staging artifact in the specification layer.
+
+**Traces to:** RQ-INDEXER-003A, RQ-INDEXER-003E, RQ-INDEXER-004F
+
 ### DSG-LFI-002 `Batch runtime shape`
 
 The indexer runtime is a Linux Docker container that executes one batch under a
@@ -212,14 +236,14 @@ class.
 
 For email, a mailbox item is a source container that LexonArchiveBuilder expands into
 stored mailbox and normalized email artifacts plus chunk-sized delegated index
-items before invoking `lexongraph-indexer`.
+items before invoking `lexongraph-streaming-indexer`.
 
 Within that runtime shape, any stage that includes ingestion may advance mailbox
-by mailbox through the incremental delegated indexing seam rather than waiting
-for all delegated work to accumulate behind one final indexer call. A
+by mailbox through replay staging and streaming-pass preparation rather than
+waiting for all delegated work to accumulate behind one final terminal call. A
 clustering-only request may leave the collection empty and instead derive its
 input from the configured block store through the separate standalone
-clustering-discovery seam.
+clustering-discovery seam plus replay-staging seam.
 
 **Traces to:** RQ-INDEXER-001, RQ-INDEXER-002, RQ-INDEXER-003A,
 RQ-INDEXER-003D, RQ-INDEXER-003E
@@ -232,35 +256,36 @@ the selected indexing stage advances.
 The first design baseline reports at least:
 
 - mailbox-processing start or completion boundaries
-- delegated indexing progress after additional chunk items or constructed
-  blocks have been advanced
-- clustering or block-assembly progress after upstream callback events indicate
-  that additional clustering work has advanced
+- delegated indexing progress after additional replay batches, training passes,
+  or constructed blocks have advanced
+- clustering or block-assembly progress after upstream observer events indicate
+  that additional streaming work has advanced
 
 This signaling remains part of the short-lived batch runtime and does not
 introduce a separate progress API, control-plane service, or MCP-visible
 surface. For a default full-pipeline run, mailbox or delegated-indexing
-progress appears first and clustering-callback progress follows on the same
-runtime-visible stream once clustering begins.
+progress appears first and observer-driven streaming finalization progress
+follows on the same runtime-visible stream.
 
 **Traces to:** RQ-INDEXER-001, RQ-INDEXER-008B
 
-### DSG-LFI-002B `Clustering callback signaling`
+### DSG-LFI-002B `Streaming status signaling`
 
-LexonArchiveBuilder realizes clustering observability by implementing the upstream
-LexonGraph clustering status-callback trait and translating callback events into
+LexonArchiveBuilder realizes long-running indexing observability by implementing the
+upstream streaming status-observer seam and translating observer events into
 runtime-visible progress messages.
 
-This keeps clustering visibility on the same batch-log surface already used for
-mailbox and delegated-indexing progress. It does not introduce a separate
-progress transport, metrics backend, or MCP-visible monitoring surface.
+This keeps training-pass, training-completion, finalization, and clustering
+visibility on the same batch-log surface already used for mailbox and
+delegated-indexing progress. It does not introduce a separate progress
+transport, metrics backend, or MCP-visible monitoring surface.
 
 **Traces to:** RQ-INDEXER-008B, RQ-INDEXER-010A
 
 ### DSG-LFI-003 `Collection item normalization`
 
 LexonArchiveBuilder models each batch element as an application-owned indexing item that
-can be transformed into a `lexongraph_indexer::IndexItem<R>` with:
+can be transformed into a `lexongraph_streaming_indexer::IndexItem<R>` with:
 
 - application metadata
 - a content reference `R`
@@ -286,7 +311,8 @@ LexonArchiveBuilder realizes mailbox-driven email indexing as a staged pipeline:
 3. normalize each message into a canonical CBOR email artifact
 4. derive email-core text from the normalized email artifact
 5. split the email core into chunk-sized delegated index items
-6. delegate chunk indexing to `lexongraph-indexer`
+6. delegate chunk indexing through replay-safe `lexongraph-streaming-indexer`
+   batches
 
 This expansion is LexonArchiveBuilder-owned orchestration and does not require changes
 to LexonGraph public contracts.
@@ -302,9 +328,10 @@ RQ-INDEXER-004B, RQ-INDEXER-004D, RQ-INDEXER-005
 
 ### DSG-LFI-004 `Content resolution adapter`
 
-LexonArchiveBuilder provides a concrete `lexongraph_indexer::ContentResolver<R>`
+LexonArchiveBuilder provides a concrete `lexongraph_streaming_indexer::ContentResolver<R>`
 implementation that resolves a collection item's content reference into the
-`Content` value consumed by the delegated indexer.
+`Content` value consumed by the delegated indexer and supplies the replay-stable
+fingerprint required by the upstream streaming contract.
 
 The resolver owns source-specific retrieval logic for initially supported item
 classes such as mailboxes and document collections, while preserving one stable
@@ -322,6 +349,22 @@ chunk derivation, without widening the first increment to arbitrary mailbox
 archive extensions.
 
 **Traces to:** RQ-INDEXER-002, RQ-INDEXER-004, RQ-INDEXER-010
+
+### DSG-LFI-004G `Replay fingerprint derivation`
+
+LexonArchiveBuilder derives replay fingerprints from stable, content-based identity inputs
+rather than from transient runtime state.
+
+For document-derived items, the fingerprint is derived from the resolved content
+identity exposed by the batch item. For email-derived chunk items, the
+fingerprint is derived from the normalized email artifact identity plus the
+stable chunk locator.
+
+This design fixes the stable fingerprint inputs but leaves the exact
+serialization details to implementation so long as the resulting fingerprint is
+deterministic across training passes, finalization replay, and reruns.
+
+**Traces to:** RQ-INDEXER-004F, RQ-INDEXER-008
 
 ### DSG-LFI-004A `Normalized email artifact shape`
 
@@ -539,8 +582,8 @@ documented, and never drops below one.
 This configuration surface remains environment-neutral: local/testing and the
 preserved production profile use the same request shape, stage-selection
 contract, and scheduler contract. Higher-layer parent construction remains
-serial at the LexonArchiveBuilder layer until the upstream delegated indexing API
-exposes a compatible concurrency seam.
+serial at the LexonArchiveBuilder layer until the upstream streaming indexing
+API exposes a compatible concurrency seam.
 
 **Traces to:** RQ-INDEXER-003C, RQ-INDEXER-003D, RQ-INDEXER-007,
 RQ-INDEXER-010
@@ -550,8 +593,8 @@ RQ-INDEXER-010
 Local/testing and production environments differ only in adapter realization and
 provider configuration, not in the container's batch contract, the staged email
 artifact model, content item shape, the stage-selection and concurrency-
-configuration surfaces, or the delegated `lexongraph-indexer` orchestration
-contract.
+configuration surfaces, or the delegated `lexongraph-streaming-indexer`
+orchestration contract.
 
 The MVP realizes this parity boundary by keeping the core orchestration and item
 model environment-neutral even though only the local/testing profile executes in
@@ -583,6 +626,11 @@ Under a stable normalization and chunking policy, unchanged mailbox content is
 expected to produce the same mailbox artifact, normalized email artifact, and
 derived chunk identities on repeated runs.
 
+Replay staging and content fingerprinting are likewise required to be
+semantically transparent: repeated training and finalization replays over the
+same logical item set must not introduce replay mismatches under unchanged
+content and metadata semantics.
+
 Leaf-layer scheduling is therefore required to be semantically transparent:
 changing the concurrency budget may change throughput, but it does not change
 the logical block set or final root produced for unchanged input under the same
@@ -602,12 +650,14 @@ RQ-INDEXER-003E, RQ-INDEXER-010A
 
 LexonArchiveBuilder-owned verification artifacts validate:
 
-- correct delegation to `lexongraph-indexer`
-- correct use of the incremental delegated indexing seam
+- correct delegation to `lexongraph-streaming-indexer`
+- correct use of the replay-based streaming indexing seam
 - correct stage-selectable execution across CLI and request-file invocation
+  without exposing the raw upstream lifecycle
 - correct leaf-layer concurrency scheduling with cross-layer barriers
 - correct standalone clustering input discovery through the upstream block-
   iteration contract
+- correct deterministic replay staging and replay-stable content fingerprinting
 - correct selection and use of content-resolution, block-store, and
   embedding-provider adapters
 - correct interoperability of the local filesystem-backed block-store profile
@@ -615,8 +665,8 @@ LexonArchiveBuilder-owned verification artifacts validate:
 - correct mailbox retention, normalized email artifact derivation, and chained
   provenance
 - correct shaping of chunk-sized delegated email items
-- correct progress visibility during long-running mailbox batches and clustering
-  work, including callback-driven clustering visibility
+- correct progress visibility during long-running mailbox batches and streaming
+  work, including observer-driven finalization visibility
 - correct application and defaulting of the administrator-defined concurrency
   budget
 - preservation of stable batch contracts across environments
@@ -629,7 +679,8 @@ LexonGraph's own block-store or embedding-trait contracts beyond proving that
 LexonArchiveBuilder consumes them correctly.
 
 **Traces to:** RQ-INDEXER-003A, RQ-INDEXER-003B, RQ-INDEXER-003C,
-RQ-INDEXER-003D, RQ-INDEXER-003E, RQ-INDEXER-008A, RQ-INDEXER-008B,
-RQ-INDEXER-010A, RQ-INDEXER-010B, RQ-INDEXER-010, DSG-LFI-001A,
-DSG-LFI-001B, DSG-LFI-001C, DSG-LFI-001D, DSG-LFI-001E, DSG-LFI-002A,
-DSG-LFI-002B, DSG-LFI-005A, DSG-LFI-007A, DSG-LFI-007B
+RQ-INDEXER-003D, RQ-INDEXER-003E, RQ-INDEXER-004F, RQ-INDEXER-008A,
+RQ-INDEXER-008B, RQ-INDEXER-010A, RQ-INDEXER-010B, RQ-INDEXER-010,
+DSG-LFI-001A, DSG-LFI-001B, DSG-LFI-001C, DSG-LFI-001D, DSG-LFI-001E,
+DSG-LFI-001F, DSG-LFI-002A, DSG-LFI-002B, DSG-LFI-004G, DSG-LFI-005A,
+DSG-LFI-007A, DSG-LFI-007B

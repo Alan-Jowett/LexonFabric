@@ -7,6 +7,7 @@ use lexongraph_embeddings_trait::{EmbeddingInput, EmbeddingProvider};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::task::JoinSet;
 
 use crate::config::{EnvironmentConfig, LocalEmbeddingConfig};
 
@@ -179,6 +180,48 @@ impl EmbeddingProvider for ConfiguredEmbeddingProvider {
     ) -> Result<Vec<u8>, Self::Error> {
         match self {
             Self::Local(provider) => provider.embed_impl(input, spec).await,
+            Self::AzureOpenAi(_) => Err(ConfiguredEmbeddingProviderError::UnsupportedProduction),
+        }
+    }
+
+    async fn embed_batch(
+        &self,
+        inputs: &[EmbeddingInput],
+        spec: &EmbeddingSpec,
+    ) -> Result<Vec<Vec<u8>>, Self::Error> {
+        match self {
+            Self::Local(provider) => {
+                let mut join_set = JoinSet::new();
+                for (index, input) in inputs.iter().cloned().enumerate() {
+                    let provider = provider.clone();
+                    let spec = spec.clone();
+                    join_set.spawn(async move {
+                        let embedding = provider.embed_impl(&input, &spec).await;
+                        (index, embedding)
+                    });
+                }
+
+                let mut results = vec![None; inputs.len()];
+                while let Some(result) = join_set.join_next().await {
+                    let (index, embedding) = result.map_err(|error| {
+                        ConfiguredEmbeddingProviderError::RequestFailed {
+                            attempts: 1,
+                            message: error.to_string(),
+                        }
+                    })?;
+                    results[index] = Some(embedding?);
+                }
+
+                results
+                    .into_iter()
+                    .map(|embedding| {
+                        embedding.ok_or_else(|| ConfiguredEmbeddingProviderError::RequestFailed {
+                            attempts: 1,
+                            message: "embedding batch worker did not return a result".into(),
+                        })
+                    })
+                    .collect()
+            }
             Self::AzureOpenAi(_) => Err(ConfiguredEmbeddingProviderError::UnsupportedProduction),
         }
     }

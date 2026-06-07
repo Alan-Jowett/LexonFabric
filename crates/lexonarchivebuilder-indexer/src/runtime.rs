@@ -114,6 +114,12 @@ pub enum RuntimeError {
         #[source]
         source: BlockError,
     },
+    #[error("failed to construct leaf block {block_id}: {source}")]
+    ConstructLeafBlock {
+        block_id: String,
+        #[source]
+        source: BlockError,
+    },
     #[error("staged block hash mismatch: expected {expected}, store returned {actual}")]
     StagedBlockHashMismatch { expected: String, actual: String },
     #[error(transparent)]
@@ -227,9 +233,6 @@ where
             max_concurrency,
             &progress,
         )?;
-        if replay_batches.is_empty() {
-            return Err(RuntimeError::NoClusterableBlocks);
-        }
         return run_ingestion_only_stage(
             &block_store,
             resolver,
@@ -250,9 +253,6 @@ where
             max_concurrency,
             &progress,
         )?;
-        if replay_batches.is_empty() {
-            return Err(RuntimeError::NoClusterableBlocks);
-        }
         request.environment.local_embedding()?;
         let embedding_provider =
             ConfiguredEmbeddingProvider::from_environment(&request.environment)?;
@@ -331,18 +331,21 @@ fn prepare_request_replay_batches(
 
     let document_items = request.to_document_index_items(request_dir);
     if !document_items.is_empty() {
+        let document_item_count = document_items.len();
         report_progress(
             progress,
             format!(
                 "Indexing {} document item(s) with up to {} concurrent leaf worker(s)",
-                document_items.len(),
+                document_item_count,
                 max_concurrency
             ),
         );
-        batches.push(ReplayBatch {
-            completion_message: Some(format!("Indexed {} document item(s)", document_items.len())),
-            items: document_items,
-        });
+        append_chunked_replay_batches(
+            &mut batches,
+            document_items,
+            max_concurrency,
+            format!("Indexed {} document item(s)", document_item_count),
+        );
     }
 
     for item in &request.items {
@@ -362,18 +365,39 @@ fn prepare_request_replay_batches(
                     expansion.items.len()
                 ),
             );
-            batches.push(ReplayBatch {
-                completion_message: Some(format!(
+            let delegated_item_count = expansion.items.len();
+            append_chunked_replay_batches(
+                &mut batches,
+                expansion.items,
+                max_concurrency,
+                format!(
                     "Indexed {} delegated item(s) from mailbox {}",
-                    expansion.items.len(),
+                    delegated_item_count,
                     resolved.display()
-                )),
-                items: expansion.items,
-            });
+                ),
+            );
         }
     }
 
     Ok(batches)
+}
+
+fn append_chunked_replay_batches(
+    batches: &mut Vec<ReplayBatch>,
+    items: Vec<IndexItem<ContentRef>>,
+    max_concurrency: usize,
+    completion_message: String,
+) {
+    let chunk_size = max_concurrency.max(1);
+    let mut iter = items.into_iter().peekable();
+    while iter.peek().is_some() {
+        let chunk = iter.by_ref().take(chunk_size).collect::<Vec<_>>();
+        let is_last_chunk = iter.peek().is_none();
+        batches.push(ReplayBatch {
+            items: chunk,
+            completion_message: is_last_chunk.then(|| completion_message.clone()),
+        });
+    }
 }
 
 async fn build_leaf_blocks_concurrently(
@@ -464,7 +488,7 @@ async fn construct_leaf_block_batch(
             }],
             None,
         )
-        .map_err(|source| RuntimeError::DeserializeStagedBlock {
+        .map_err(|source| RuntimeError::ConstructLeafBlock {
             block_id: "<leaf>".into(),
             source,
         })?;
@@ -1490,6 +1514,51 @@ mod tests {
         let summary = run_request(temp.path(), request).await.unwrap();
         assert!(!summary.block_ids.is_empty());
         assert!(server.max_in_flight() > 1);
+        server.join();
+    }
+
+    #[tokio::test]
+    async fn max_concurrency_caps_full_pipeline_embedding_requests() {
+        let temp = tempdir().unwrap();
+        let document_names = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+        let items = document_names
+            .iter()
+            .map(|name| {
+                let path = temp.path().join(format!("{name}.txt"));
+                fs::write(&path, format!("{name}\n")).unwrap();
+                BatchItemConfig::Document {
+                    path: path.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let server = spawn_embedding_server_with_delay(6, Duration::from_millis(75));
+        let request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: server.base_url.clone(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
+            max_concurrency: Some(3),
+            items,
+        };
+
+        let summary = run_request(temp.path(), request).await.unwrap();
+        assert!(!summary.block_ids.is_empty());
+        assert!(server.max_in_flight() <= 3);
         server.join();
     }
 

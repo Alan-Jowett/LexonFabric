@@ -352,7 +352,7 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use lexonarchivebuilder_indexer::config::{
         BatchItemConfig, BatchRequest, EmbeddingSpecConfig, EnvironmentConfig, ExecutionStage,
@@ -718,7 +718,8 @@ mod tests {
         let seen_for_thread = Arc::clone(&seen);
         let shutdown_for_thread = Arc::clone(&shutdown);
         let handle = thread::spawn(move || {
-            while !shutdown_for_thread.load(Ordering::SeqCst) {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !shutdown_for_thread.load(Ordering::SeqCst) && Instant::now() < deadline {
                 let (mut stream, _) = match listener.accept() {
                     Ok(pair) => pair,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

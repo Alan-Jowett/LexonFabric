@@ -327,7 +327,7 @@ fn prepare_request_replay_batches(
     max_concurrency: usize,
     progress: &ProgressReporter,
 ) -> Result<Vec<ReplayBatch>, RuntimeError> {
-    let mut batches = Vec::new();
+    let mut items = Vec::new();
 
     let document_items = request.to_document_index_items(request_dir);
     if !document_items.is_empty() {
@@ -339,12 +339,11 @@ fn prepare_request_replay_batches(
                 document_item_count, max_concurrency
             ),
         );
-        append_chunked_replay_batches(
-            &mut batches,
-            document_items,
-            max_concurrency,
+        report_progress(
+            progress,
             format!("Indexed {} document item(s)", document_item_count),
         );
+        items.extend(document_items);
     }
 
     for item in &request.items {
@@ -364,39 +363,56 @@ fn prepare_request_replay_batches(
                     expansion.items.len()
                 ),
             );
-            let delegated_item_count = expansion.items.len();
-            append_chunked_replay_batches(
-                &mut batches,
-                expansion.items,
-                max_concurrency,
+            report_progress(
+                progress,
                 format!(
                     "Indexed {} delegated item(s) from mailbox {}",
-                    delegated_item_count,
+                    expansion.items.len(),
                     resolved.display()
                 ),
             );
+            items.extend(expansion.items);
         }
     }
 
-    Ok(batches)
+    sort_replay_items(&mut items);
+    Ok(chunk_replay_items(items, max_concurrency))
 }
 
-fn append_chunked_replay_batches(
-    batches: &mut Vec<ReplayBatch>,
+fn chunk_replay_items(
     items: Vec<IndexItem<ContentRef>>,
     max_concurrency: usize,
-    completion_message: String,
-) {
+) -> Vec<ReplayBatch> {
+    let mut batches = Vec::new();
     let chunk_size = max_concurrency.max(1);
     let mut iter = items.into_iter().peekable();
     while iter.peek().is_some() {
-        let chunk = iter.by_ref().take(chunk_size).collect::<Vec<_>>();
-        let is_last_chunk = iter.peek().is_none();
+        let chunk = iter.by_ref().take(chunk_size).collect();
         batches.push(ReplayBatch {
             items: chunk,
-            completion_message: is_last_chunk.then(|| completion_message.clone()),
+            completion_message: None,
         });
     }
+    batches
+}
+
+fn sort_replay_items(items: &mut [IndexItem<ContentRef>]) {
+    items.sort_by_key(replay_sort_key);
+}
+
+fn replay_sort_key(item: &IndexItem<ContentRef>) -> (String, Vec<(String, String)>) {
+    let content_key = match &item.content_ref {
+        ContentRef::Document { path } => format!("document:{}", path.to_string_lossy()),
+        ContentRef::Inline { media_type, body } => {
+            format!("inline:{media_type}:{:?}", body)
+        }
+        ContentRef::EmailChunk {
+            email_artifact_ref,
+            chunk_index,
+        } => format!("email:{email_artifact_ref}:{chunk_index:020}"),
+    };
+    let metadata_key = metadata_to_text_map(&item.metadata).into_iter().collect();
+    (content_key, metadata_key)
 }
 
 async fn build_leaf_blocks_concurrently(
@@ -414,30 +430,35 @@ async fn build_leaf_blocks_concurrently(
     }
 
     let concurrency = max_concurrency.max(1).min(items.len());
-    let batch_size = items.len().div_ceil(concurrency);
-    let batch_count = items.len().div_ceil(batch_size);
     let mut join_set = JoinSet::new();
-    for (batch_index, chunk) in items.chunks(batch_size).enumerate() {
-        let resolver = resolver.clone();
-        let embedding_provider = embedding_provider.clone();
-        let embedding_spec = embedding_spec.clone();
-        let batch_items = chunk.to_vec();
-        join_set.spawn(async move {
-            let constructed = construct_leaf_block_batch(
-                resolver,
-                embedding_provider,
-                batch_items,
-                embedding_spec,
-            )
-            .await?;
-            Ok::<(usize, ConstructedBlocks), RuntimeError>((batch_index, constructed))
-        });
+    let mut next_index = 0;
+    while next_index < concurrency {
+        spawn_leaf_block_task(
+            &mut join_set,
+            next_index,
+            resolver.clone(),
+            embedding_provider.clone(),
+            items[next_index].clone(),
+            embedding_spec.clone(),
+        );
+        next_index += 1;
     }
 
-    let mut completed = (0..batch_count).map(|_| None).collect::<Vec<_>>();
+    let mut completed = (0..items.len()).map(|_| None).collect::<Vec<_>>();
     while let Some(result) = join_set.join_next().await {
         let (batch_index, constructed) = result??;
         completed[batch_index] = Some(constructed);
+        if next_index < items.len() {
+            spawn_leaf_block_task(
+                &mut join_set,
+                next_index,
+                resolver.clone(),
+                embedding_provider.clone(),
+                items[next_index].clone(),
+                embedding_spec.clone(),
+            );
+            next_index += 1;
+        }
     }
 
     let mut block_ids = Vec::with_capacity(items.len());
@@ -448,6 +469,22 @@ async fn build_leaf_blocks_concurrently(
     }
 
     Ok(ConstructedBlocks { block_ids, blocks })
+}
+
+fn spawn_leaf_block_task(
+    join_set: &mut JoinSet<Result<(usize, ConstructedBlocks), RuntimeError>>,
+    item_index: usize,
+    resolver: LocalFilesystemContentResolver,
+    embedding_provider: ConfiguredEmbeddingProvider,
+    item: IndexItem<ContentRef>,
+    embedding_spec: EmbeddingSpec,
+) {
+    join_set.spawn(async move {
+        let constructed =
+            construct_leaf_block_batch(resolver, embedding_provider, vec![item], embedding_spec)
+                .await?;
+        Ok::<(usize, ConstructedBlocks), RuntimeError>((item_index, constructed))
+    });
 }
 
 async fn construct_leaf_block_batch(
@@ -618,6 +655,8 @@ fn load_replay_batches_from_store(
         return Err(RuntimeError::NoClusterableBlocks);
     }
 
+    sort_replay_items(&mut items);
+
     report_progress(
         progress,
         format!(
@@ -626,10 +665,7 @@ fn load_replay_batches_from_store(
         ),
     );
     Ok((
-        vec![ReplayBatch {
-            items,
-            completion_message: None,
-        }],
+        chunk_replay_items(items, usize::MAX),
         StoredLeafEmbeddingProvider {
             embeddings_by_input_hash: Arc::new(embeddings_by_input_hash),
         },
@@ -1558,6 +1594,124 @@ mod tests {
         let summary = run_request(temp.path(), request).await.unwrap();
         assert!(!summary.block_ids.is_empty());
         assert!(server.max_in_flight() <= 3);
+        server.join();
+    }
+
+    #[tokio::test]
+    async fn max_concurrency_caps_ingestion_only_embedding_requests() {
+        let temp = tempdir().unwrap();
+        let document_names = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+        let items = document_names
+            .iter()
+            .map(|name| {
+                let path = temp.path().join(format!("{name}.txt"));
+                fs::write(&path, format!("{name}\n")).unwrap();
+                BatchItemConfig::Document {
+                    path: path.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let server = spawn_embedding_server_with_delay(6, Duration::from_millis(75));
+        let request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: server.base_url.clone(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::IngestionAndEmbedding,
+            max_concurrency: Some(3),
+            items,
+        };
+
+        let summary = run_request(temp.path(), request).await.unwrap();
+        assert_eq!(summary.root_id, INGESTION_ONLY_ROOT_ID_PLACEHOLDER);
+        assert!(summary.block_count > 0);
+        assert!(server.max_in_flight() <= 3);
+        server.join();
+    }
+
+    #[tokio::test]
+    async fn clustering_only_stage_matches_full_pipeline_with_request_items_in_non_sorted_order() {
+        let temp = tempdir().unwrap();
+        let document_a = temp.path().join("alpha.txt");
+        let document_b = temp.path().join("beta.txt");
+        fs::write(&document_a, b"alpha\n").unwrap();
+        fs::write(&document_b, b"beta\n").unwrap();
+
+        let server = spawn_embedding_server(2);
+        let full_request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: server.base_url.clone(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
+            max_concurrency: Some(2),
+            items: vec![
+                BatchItemConfig::Document {
+                    path: document_b.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                },
+                BatchItemConfig::Document {
+                    path: document_a.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+        let seeded = run_request(temp.path(), full_request).await.unwrap();
+
+        let cluster_only_request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: String::new(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::ClusteringAndBlockAssembly,
+            max_concurrency: None,
+            items: vec![],
+        };
+
+        let clustered = run_request(temp.path(), cluster_only_request)
+            .await
+            .unwrap();
+
+        assert_eq!(clustered.root_id, seeded.root_id);
+        assert_eq!(clustered.block_ids, seeded.block_ids);
         server.join();
     }
 

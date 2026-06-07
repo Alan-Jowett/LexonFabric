@@ -1,5 +1,5 @@
 ---
-name: evolve-lexonarchivebuilder
+name: evolve
 description: >
   Incrementally evolve LexonArchiveBuilder through requirements discovery,
   specification changes, implementation updates, adversarial audits,

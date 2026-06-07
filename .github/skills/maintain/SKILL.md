@@ -1,5 +1,5 @@
 ---
-name: maintain-lexonarchivebuilder
+name: maintain
 description: >
   Audit LexonArchiveBuilder for semantic drift, classify findings with the user,
   generate corrective patches, and produce a gated maintenance

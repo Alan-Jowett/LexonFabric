@@ -269,7 +269,7 @@ where
     }
 
     let (replay_batches, embedding_provider) =
-        load_replay_batches_from_store(&block_store, &embedding_spec, &progress)?;
+        load_replay_batches_from_store(&block_store, &embedding_spec, max_concurrency, &progress)?;
     run_streaming_stage(
         resolver,
         embedding_provider,
@@ -614,6 +614,7 @@ where
 fn load_replay_batches_from_store(
     store: &ConfiguredBlockStore,
     embedding_spec: &EmbeddingSpec,
+    max_concurrency: usize,
     progress: &ProgressReporter,
 ) -> Result<(Vec<ReplayBatch>, StoredLeafEmbeddingProvider), RuntimeError> {
     report_progress(
@@ -661,7 +662,7 @@ fn load_replay_batches_from_store(
         ),
     );
     Ok((
-        chunk_replay_items(items, usize::MAX),
+        chunk_replay_items(items, max_concurrency),
         StoredLeafEmbeddingProvider {
             embeddings_by_input_hash: Arc::new(embeddings_by_input_hash),
         },
@@ -1708,6 +1709,76 @@ mod tests {
 
         assert_eq!(clustered.root_id, seeded.root_id);
         assert_eq!(clustered.block_ids, seeded.block_ids);
+        server.join();
+    }
+
+    #[tokio::test]
+    async fn clustering_only_replay_batches_respect_max_concurrency() {
+        let temp = tempdir().unwrap();
+        let document_names = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        let items = document_names
+            .iter()
+            .map(|name| {
+                let path = temp.path().join(format!("{name}.txt"));
+                fs::write(&path, format!("{name}\n")).unwrap();
+                BatchItemConfig::Document {
+                    path: path.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let server = spawn_embedding_server(document_names.len());
+        let request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: server.base_url.clone(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
+            max_concurrency: Some(2),
+            items,
+        };
+        run_request(temp.path(), request).await.unwrap();
+
+        let block_store = ConfiguredBlockStore::from_environment(
+            temp.path(),
+            &EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: String::new(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+        )
+        .unwrap();
+        let embedding_spec = EmbeddingSpec {
+            dims: 2,
+            encoding: "f32le".into(),
+        };
+        let progress: ProgressReporter = Arc::new(|_| {});
+        let (replay_batches, _) =
+            load_replay_batches_from_store(&block_store, &embedding_spec, 2, &progress).unwrap();
+
+        assert_eq!(replay_batches.len(), 3);
+        assert_eq!(replay_batches[0].items.len(), 2);
+        assert_eq!(replay_batches[1].items.len(), 2);
+        assert_eq!(replay_batches[2].items.len(), 1);
         server.join();
     }
 

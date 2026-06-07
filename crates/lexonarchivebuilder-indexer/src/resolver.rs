@@ -1,6 +1,10 @@
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use ciborium::Value;
 use lexongraph_block::{Block, BlockHash, Content};
@@ -30,11 +34,17 @@ pub enum ContentRef {
 #[derive(Clone, Debug)]
 pub struct LocalFilesystemContentResolver {
     block_store: ConfiguredBlockStore,
+    email_chunk_cache: Arc<Mutex<HashMap<String, Arc<Vec<String>>>>>,
 }
+
+type EmailChunkCache = Arc<Mutex<HashMap<String, Arc<Vec<String>>>>>;
 
 impl LocalFilesystemContentResolver {
     pub fn new(block_store: ConfiguredBlockStore) -> Self {
-        Self { block_store }
+        Self {
+            block_store,
+            email_chunk_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -94,7 +104,12 @@ impl ContentResolver<ContentRef> for LocalFilesystemContentResolver {
             ContentRef::EmailChunk {
                 email_artifact_ref,
                 chunk_index,
-            } => resolve_email_chunk(&self.block_store, email_artifact_ref, *chunk_index),
+            } => resolve_email_chunk(
+                &self.block_store,
+                &self.email_chunk_cache,
+                email_artifact_ref,
+                *chunk_index,
+            ),
         }
     }
 
@@ -159,9 +174,43 @@ fn resolve_file(
 
 fn resolve_email_chunk(
     store: &ConfiguredBlockStore,
+    cache: &EmailChunkCache,
     email_artifact_ref: &str,
     chunk_index: usize,
 ) -> Result<Content, LocalFilesystemContentResolverError> {
+    let chunks = {
+        let cache_guard = cache.lock().unwrap();
+        cache_guard.get(email_artifact_ref).cloned()
+    };
+    let chunks = match chunks {
+        Some(chunks) => chunks,
+        None => {
+            let chunks = Arc::new(load_email_chunks(store, email_artifact_ref)?);
+            let mut cache_guard = cache.lock().unwrap();
+            Arc::clone(
+                cache_guard
+                    .entry(email_artifact_ref.to_string())
+                    .or_insert_with(|| Arc::clone(&chunks)),
+            )
+        }
+    };
+    let Some(chunk) = chunks.get(chunk_index) else {
+        return Err(LocalFilesystemContentResolverError::MissingChunk {
+            block_id: email_artifact_ref.to_string(),
+            chunk_index,
+        });
+    };
+
+    Ok(Content {
+        media_type: CHUNK_MEDIA_TYPE.to_string(),
+        body: chunk.as_bytes().to_vec(),
+    })
+}
+
+fn load_email_chunks(
+    store: &ConfiguredBlockStore,
+    email_artifact_ref: &str,
+) -> Result<Vec<String>, LocalFilesystemContentResolverError> {
     let block_id = parse_block_hash(email_artifact_ref)?;
     let Some(validated) = store.get(&block_id)? else {
         return Err(LocalFilesystemContentResolverError::MissingArtifact {
@@ -189,18 +238,7 @@ fn resolve_email_chunk(
         );
     }
     let body = normalized_email_body(&entry.content.body, email_artifact_ref)?;
-    let chunks = chunk_email_core(&body);
-    let Some(chunk) = chunks.get(chunk_index) else {
-        return Err(LocalFilesystemContentResolverError::MissingChunk {
-            block_id: email_artifact_ref.to_string(),
-            chunk_index,
-        });
-    };
-
-    Ok(Content {
-        media_type: CHUNK_MEDIA_TYPE.to_string(),
-        body: chunk.as_bytes().to_vec(),
-    })
+    Ok(chunk_email_core(&body))
 }
 
 fn normalized_email_body(
@@ -275,7 +313,7 @@ mod tests {
     use std::fmt;
     use std::fs;
 
-    use lexongraph_block::BlockHash;
+    use lexongraph_block::{Block, BlockHash, Content, LeafEntry, VERSION_1, build_leaf_block};
     use lexongraph_streaming_indexer::{IndexItem, Metadata, conformance};
     use tempfile::tempdir;
 
@@ -436,9 +474,66 @@ mod tests {
         assert_eq!(content.body, vec![0x66, 0x6f, 0x80, 0x6f]);
     }
 
+    #[test]
+    fn email_chunk_resolution_caches_decoded_chunks_per_artifact() {
+        let dir = tempdir().unwrap();
+        let store = local_store(dir.path().join("blocks"));
+        let email_artifact_ref = normalized_email_artifact_ref(
+            &store,
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+        );
+        let resolver = LocalFilesystemContentResolver::new(store);
+
+        let first = resolver
+            .resolve(&ContentRef::EmailChunk {
+                email_artifact_ref: email_artifact_ref.clone(),
+                chunk_index: 0,
+            })
+            .unwrap();
+        let second = resolver
+            .resolve(&ContentRef::EmailChunk {
+                email_artifact_ref,
+                chunk_index: 0,
+            })
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(resolver.email_chunk_cache.lock().unwrap().len(), 1);
+    }
+
     fn local_store(path: PathBuf) -> ConfiguredBlockStore {
         ConfiguredBlockStore::Local(
             lexongraph_block_store_fs::FilesystemBlockStore::new(path).unwrap(),
         )
+    }
+
+    fn normalized_email_artifact_ref(store: &ConfiguredBlockStore, body: &str) -> String {
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(
+            &Value::Map(vec![(
+                Value::Text("body".into()),
+                Value::Text(body.to_string()),
+            )]),
+            &mut encoded,
+        )
+        .unwrap();
+        let block = build_leaf_block(
+            VERSION_1,
+            lexongraph_block::EmbeddingSpec {
+                dims: 0,
+                encoding: "f32le".into(),
+            },
+            vec![LeafEntry {
+                embedding: Vec::new(),
+                metadata: Vec::new(),
+                content: Content {
+                    media_type: "application/vnd.lexonarchivebuilder.normalized-email+cbor".into(),
+                    body: encoded,
+                },
+            }],
+            None,
+        )
+        .unwrap();
+        store.put(&Block::Leaf(block)).unwrap().to_string()
     }
 }

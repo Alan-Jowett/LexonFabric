@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use lexongraph_block::{
@@ -147,7 +147,7 @@ struct StoredLeafEmbeddingProvider {
 #[derive(Clone, Debug)]
 struct RecordingEmbeddingProvider<EP> {
     inner: EP,
-    embeddings_by_input_hash: Arc<std::sync::Mutex<HashMap<[u8; 32], Vec<u8>>>>,
+    embeddings_by_input_hash: Arc<Mutex<HashMap<[u8; 32], Vec<u8>>>>,
 }
 
 #[derive(Debug, Error)]
@@ -278,8 +278,15 @@ impl<EP> RecordingEmbeddingProvider<EP> {
     fn new(inner: EP) -> Self {
         Self {
             inner,
-            embeddings_by_input_hash: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            embeddings_by_input_hash: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -295,10 +302,7 @@ where
         spec: &EmbeddingSpec,
     ) -> Result<Vec<u8>, Self::Error> {
         let key = hash_embedding_input(input).into_bytes();
-        if let Some(embedding) = self
-            .embeddings_by_input_hash
-            .lock()
-            .unwrap()
+        if let Some(embedding) = lock_unpoisoned(&self.embeddings_by_input_hash)
             .get(&key)
             .cloned()
         {
@@ -306,10 +310,7 @@ where
         }
 
         let embedding = self.inner.embed(input, spec).await?;
-        self.embeddings_by_input_hash
-            .lock()
-            .unwrap()
-            .insert(key, embedding.clone());
+        lock_unpoisoned(&self.embeddings_by_input_hash).insert(key, embedding.clone());
         Ok(embedding)
     }
 
@@ -322,7 +323,7 @@ where
         let mut missing_indices = Vec::new();
         let mut missing_inputs = Vec::new();
         {
-            let cache = self.embeddings_by_input_hash.lock().unwrap();
+            let cache = lock_unpoisoned(&self.embeddings_by_input_hash);
             for (index, input) in inputs.iter().enumerate() {
                 let key = hash_embedding_input(input).into_bytes();
                 if let Some(embedding) = cache.get(&key) {
@@ -339,7 +340,7 @@ where
 
         let fetched_embeddings = self.inner.embed_batch(&missing_inputs, spec).await?;
         {
-            let mut cache = self.embeddings_by_input_hash.lock().unwrap();
+            let mut cache = lock_unpoisoned(&self.embeddings_by_input_hash);
             for ((index, input), embedding) in missing_indices
                 .into_iter()
                 .zip(missing_inputs.iter())
@@ -1486,47 +1487,59 @@ fn format_indexing_status(status: StreamingIndexingStatus) -> String {
         (
             StreamingIndexingPhase::BottomUpAssembly { layer_index },
             StreamingIndexingStatusState::Started,
-        ) => format!(
-            "Bottom-up assembly for layer {layer_index} started after {elapsed_ms} ms for {} input block(s) across {} group(s)",
-            status.item_count,
-            status
-                .phase_total_unit_count
-                .unwrap_or(status.completed_unit_count)
-        ),
+        ) => match status.phase_total_unit_count {
+            Some(group_total) => format!(
+                "Bottom-up assembly for layer {layer_index} started after {elapsed_ms} ms for {} input block(s) across {group_total} group(s)",
+                status.item_count
+            ),
+            None => format!(
+                "Bottom-up assembly for layer {layer_index} started after {elapsed_ms} ms for {} input block(s) across an unknown group total",
+                status.item_count
+            ),
+        },
         (
             StreamingIndexingPhase::BottomUpAssembly { layer_index },
             StreamingIndexingStatusState::InProgress,
-        ) => format!(
-            "Bottom-up assembly for layer {layer_index} still running after {elapsed_ms} ms; completed {} of {} group(s) from {} input block(s)",
-            status.completed_unit_count,
-            status
-                .phase_total_unit_count
-                .unwrap_or(status.completed_unit_count),
-            status.item_count
-        ),
+        ) => match status.phase_total_unit_count {
+            Some(group_total) => format!(
+                "Bottom-up assembly for layer {layer_index} still running after {elapsed_ms} ms; completed {} of {group_total} group(s) from {} input block(s)",
+                status.completed_unit_count, status.item_count
+            ),
+            None => format!(
+                "Bottom-up assembly for layer {layer_index} still running after {elapsed_ms} ms; completed {} group(s) so far from {} input block(s)",
+                status.completed_unit_count, status.item_count
+            ),
+        },
         (
             StreamingIndexingPhase::BottomUpAssembly { layer_index },
             StreamingIndexingStatusState::Completed,
-        ) => format!(
-            "Bottom-up assembly for layer {layer_index} completed in {elapsed_ms} ms: built {} of {} group(s) from {} input block(s)",
-            status.completed_unit_count,
-            status
-                .phase_total_unit_count
-                .unwrap_or(status.completed_unit_count),
-            status.item_count
-        ),
+        ) => match status.phase_total_unit_count {
+            Some(group_total) => format!(
+                "Bottom-up assembly for layer {layer_index} completed in {elapsed_ms} ms: built {} of {group_total} group(s) from {} input block(s)",
+                status.completed_unit_count, status.item_count
+            ),
+            None => format!(
+                "Bottom-up assembly for layer {layer_index} completed in {elapsed_ms} ms: built {} group(s) from {} input block(s)",
+                status.completed_unit_count, status.item_count
+            ),
+        },
         (
             StreamingIndexingPhase::BottomUpAssembly { layer_index },
             StreamingIndexingStatusState::Failed,
-        ) => format!(
-            "Bottom-up assembly for layer {layer_index} failed after {elapsed_ms} ms after completing {} of {} group(s) from {} input block(s): {}",
-            status.completed_unit_count,
-            status
-                .phase_total_unit_count
-                .unwrap_or(status.completed_unit_count),
-            status.item_count,
-            status.error.unwrap_or_else(|| "unknown error".into())
-        ),
+        ) => match status.phase_total_unit_count {
+            Some(group_total) => format!(
+                "Bottom-up assembly for layer {layer_index} failed after {elapsed_ms} ms after completing {} of {group_total} group(s) from {} input block(s): {}",
+                status.completed_unit_count,
+                status.item_count,
+                status.error.unwrap_or_else(|| "unknown error".into())
+            ),
+            None => format!(
+                "Bottom-up assembly for layer {layer_index} failed after {elapsed_ms} ms after completing {} group(s) from {} input block(s): {}",
+                status.completed_unit_count,
+                status.item_count,
+                status.error.unwrap_or_else(|| "unknown error".into())
+            ),
+        },
     }
 }
 
@@ -2601,6 +2614,25 @@ mod tests {
         assert_eq!(
             format_indexing_status(status),
             "Bottom-up assembly for layer 2 completed in 88 ms: built 3 of 3 group(s) from 12 input block(s)"
+        );
+    }
+
+    #[test]
+    fn bottom_up_assembly_progress_handles_unknown_group_total() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::BottomUpAssembly { layer_index: 1 },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 8,
+            phase_total_unit_count: None,
+            completed_unit_count: 2,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(44),
+            error: None,
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "Bottom-up assembly for layer 1 still running after 44 ms; completed 2 group(s) so far from 8 input block(s)"
         );
     }
 

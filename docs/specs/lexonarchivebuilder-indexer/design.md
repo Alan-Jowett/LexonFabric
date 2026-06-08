@@ -2,7 +2,7 @@
 
 ## Status
 
-Phase 2 specification patch for the approved email-artifact, chunk-level
+Specification patch for the approved email-artifact, chunk-level
 indexing, local filesystem block-store interoperability, replay-based
 streaming delegated indexing, stage-selectable execution, standalone
 clustering input discovery, clustering-algorithm selection, clustering-option

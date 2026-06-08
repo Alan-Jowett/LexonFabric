@@ -308,6 +308,13 @@ fn derive_auto_sized_cluster_count(
             ))
         });
     }
+    if minimum_cluster_count > estimated_child_count {
+        return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
+            format!(
+                "cannot satisfy minimum cluster count {minimum_cluster_count} for only {estimated_child_count} clustering inputs"
+            ),
+        ));
+    }
 
     let max_per =
         max_children_per_branch(embedding_spec, block_size_target, estimated_child_count)?;
@@ -2181,6 +2188,23 @@ mod tests {
             .to_string();
 
         assert!(error.contains("cannot satisfy minimum cluster count 3"));
+    }
+
+    #[test]
+    fn omitted_directional_pca_cluster_count_fails_when_minimum_exceeds_input_count() {
+        let embedding_spec = EmbeddingSpec {
+            dims: 2,
+            encoding: "f32le".into(),
+        };
+        let block_size_target = serialized_branch_size(&embedding_spec, 8).unwrap();
+
+        let error = derive_auto_sized_cluster_count(3, 1, block_size_target, &embedding_spec)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("cannot satisfy minimum cluster count 3 for only 1 clustering inputs")
+        );
     }
 
     #[test]

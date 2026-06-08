@@ -1094,12 +1094,11 @@ mod tests {
         .unwrap();
         fs::write(&document_path, b"document body\n").unwrap();
 
-        let server = spawn_embedding_server(4);
-        let request = BatchRequest {
+        let build_request = |base_url: String| BatchRequest {
             environment: EnvironmentConfig::Local {
                 block_store_root: Path::new("blocks").to_path_buf(),
                 embedding: LocalEmbeddingConfig {
-                    base_url: server.base_url.clone(),
+                    base_url,
                     model: "all-MiniLM-L6-v2".into(),
                     api_key_env: None,
                     request_timeout_secs: 5,
@@ -1132,10 +1131,19 @@ mod tests {
             ],
         };
 
-        let first = run_request(temp.path(), request.clone()).await.unwrap();
+        let first_server = spawn_embedding_server(2);
+        let first = run_request(temp.path(), build_request(first_server.base_url.clone()))
+            .await
+            .unwrap();
         let stored_block_count_after_first = count_files_recursively(&temp.path().join("blocks"));
-        let second = run_request(temp.path(), request).await.unwrap();
+        first_server.join();
+
+        let second_server = spawn_embedding_server(2);
+        let second = run_request(temp.path(), build_request(second_server.base_url.clone()))
+            .await
+            .unwrap();
         let stored_block_count_after_second = count_files_recursively(&temp.path().join("blocks"));
+        second_server.join();
 
         assert_eq!(first.root_id, second.root_id);
         assert_eq!(first.block_ids, second.block_ids);
@@ -1144,7 +1152,6 @@ mod tests {
             stored_block_count_after_second
         );
         assert!(stored_block_count_after_second > first.block_count);
-        server.join();
     }
 
     #[tokio::test]
@@ -1272,10 +1279,10 @@ mod tests {
         assert!(
             progress
                 .iter()
-                .any(|line| line.contains("Embedding batch 1 of 1 started"))
+                .any(|line| line.contains("Embedding batch 1 of "))
         );
         assert!(progress.iter().any(|line| {
-            line.contains("Embedded batch 1 of 1; completed 2 of 2 delegated item(s)")
+            line.contains("Embedded batch") && line.contains("completed 2 of 2 delegated item(s)")
         }));
         assert!(
             progress

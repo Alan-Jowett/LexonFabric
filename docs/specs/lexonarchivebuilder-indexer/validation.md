@@ -15,13 +15,13 @@ block-construction evolution in
 ## Validation Scope
 
 These validation entries define the expected conformance surface for the
-LexonArchiveBuilder-owned indexer boundary, including local filesystem block-store
-interoperability, replay-based streaming delegated indexing, stage-selectable
-execution, standalone clustering input discovery, explicit delegated
-clustering-algorithm selection, algorithm-specific clustering-option exposure,
-embedding-phase batch-progress observability, streaming-status observability, replay-stable
-fingerprinting, and leaf-layer parallel block scheduling in the local/testing
-profile.
+LexonArchiveBuilder-owned indexer boundary, including local filesystem
+block-store interoperability, replay-based streaming delegated indexing,
+stage-selectable execution, standalone clustering input discovery, explicit
+delegated clustering-algorithm selection, algorithm-specific clustering-option
+exposure, embedding-phase batch-progress observability, streaming-status
+observability, replay-stable fingerprinting, and leaf-layer parallel block
+scheduling in the local/testing profile.
 
 This package validates LexonArchiveBuilder's batch contract, adapter selection, and
 delegated use of LexonGraph interfaces. It does not redefine validation already

@@ -735,6 +735,7 @@ where
     tokio::pin!(operation);
     loop {
         tokio::select! {
+            biased;
             result = &mut operation => return result,
             _ = heartbeat.tick() => {
                 report_progress(progress, heartbeat_message(start.elapsed()));

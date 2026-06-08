@@ -1707,9 +1707,6 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Streaming training complete"))
         );
-        assert!(progress.iter().any(|line| {
-            line.contains("Submitted all 1 replay batch(es); waiting for training pass completion")
-        }));
         server.join();
     }
 

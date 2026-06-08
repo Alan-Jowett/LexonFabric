@@ -2,9 +2,9 @@
 
 ## Document Status
 
-- **Phase:** Phase 2 - Specification Changes
-- **Status:** Approved streaming-indexer migration and clustering-configuration requirements patch being propagated into design and validation
-- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, embedding-phase, replay-submission, and streaming-status observability, and layer-parallel block-construction evolution
+- **Phase:** Phase 1 - Requirements Discovery
+- **Status:** Approved streaming-indexer migration baseline with a new requirements patch in discovery for the latest LexonGraph planning-policy update and feature-regression check
+- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, latest planning-policy compatibility, upstream regression assessment, embedding-phase, replay-submission, and streaming-status observability, and layer-parallel block-construction evolution
 
 ## USER-REQUEST
 
@@ -68,6 +68,12 @@
 - **UR-58 [KNOWN]:** An explicit caller-supplied `cluster_count` should continue to override auto-sizing; the derived count is only for the omitted-option path.
 - **UR-59 [KNOWN]:** During clustering-only replay, LexonArchiveBuilder should report repository-owned replay-batch submission progress using the batch count and cumulative delegated-item count it already knows, so operators can see how much work has been submitted to the streaming API.
 - **UR-60 [KNOWN]:** When LexonArchiveBuilder finishes submitting replay batches and begins waiting for upstream training-pass completion, the runtime progress stream should emit an explicit phase-boundary message so operators can distinguish local submission progress from upstream training-pass heartbeats.
+- **UR-61 [KNOWN]:** Adapt LexonArchiveBuilder to the latest LexonGraph version currently published on the upstream `main` branch.
+- **UR-62 [KNOWN]:** The latest LexonGraph streaming indexer replaces the older training-oriented built-in clustering factory surface with a planning-policy surface, including `HierarchicalPlanningPolicy`, `BuiltInPlanningPolicy`, planning passes, explicit planning completion, hierarchy-planning status phases, and bottom-up assembly status phases.
+- **UR-63 [KNOWN]:** Preserve the current external stage contract (`full`, `ingestion+embedding`, `clustering+block-assembly`) and existing MCP search or retrieval behavior for already-indexed content while adapting to the latest upstream indexing API.
+- **UR-64 [KNOWN]:** Determine whether the latest LexonGraph update regressed any repository-required features or only changed the API shape, so any true upstream regression can be fixed explicitly rather than hidden by narrowing LexonArchiveBuilder behavior.
+- **UR-65 [INFERRED]:** LexonArchiveBuilder currently depends on repository-owned behavior layered on top of the upstream indexing crate, including deterministic split-stage replay, explicit built-in algorithm selection for `dcbc` and `directional-pca`, omitted `cluster_count` auto-sizing, and runtime progress projection that hides raw upstream lifecycle details.
+- **UR-66 [INFERRED]:** If the latest upstream contract no longer exposes a repository-required capability, LexonArchiveBuilder must surface that incompatibility explicitly in requirements, design, and implementation review rather than silently dropping the affected behavior during adaptation.
 
 ## Change Manifest
 
@@ -108,6 +114,11 @@
 | CM-INDEXER-033 | Revise | Require omitted `cluster_count` to derive from clustering input count and embedding-driven branch capacity for every supported built-in clustering algorithm while preserving explicit caller override behavior | UR-52, UR-53, UR-56, UR-57, UR-58 |
 | CM-INDEXER-034 | Revise | Require clustering-only replay to emit repository-owned replay-batch submission progress that reports completed batches and cumulative delegated items relative to the known invocation total | UR-32, UR-39, UR-59 |
 | CM-INDEXER-035 | Add | Require an explicit runtime-visible handoff between repository-owned replay submission and upstream training-pass completion waiting so operator logs disambiguate local submission from upstream heartbeats | UR-41, UR-48, UR-60 |
+| CM-INDEXER-036 | Revise | Adapt the delegated indexing requirements from the older training-oriented streaming surface to the latest planning-policy surface published by LexonGraph while preserving the external repository contract | UR-61, UR-62, UR-63 |
+| CM-INDEXER-037 | Revise | Reframe built-in clustering configuration as a repository-owned mapping onto upstream built-in planning policy selection rather than the retired built-in clustering factory seam | UR-61, UR-62, UR-65 |
+| CM-INDEXER-038 | Add | Require explicit repository-level regression assessment for capabilities relied on by LexonArchiveBuilder before any behavior is narrowed during the upstream upgrade | UR-64, UR-65, UR-66 |
+| CM-INDEXER-039 | Revise | Update progress-observability requirements to map latest upstream planning, hierarchy-planning, and bottom-up assembly lifecycle signals onto the existing runtime progress surface without exposing raw upstream terminology directly | UR-62, UR-63, UR-65 |
+| CM-INDEXER-040 | Add | Preserve current repository-required capabilities across the latest LexonGraph upgrade, including split-stage replay, explicit algorithm selection, omitted `cluster_count` auto-sizing, and stable MCP search-serving behavior | UR-63, UR-64, UR-65, UR-66 |
 
 ## Before / After
 
@@ -286,6 +297,31 @@
 - **Before [KNOWN]:** Runtime progress could transition from repository-owned replay submission into upstream training-pass heartbeats without an explicit boundary marker, so operators could not tell whether LexonArchiveBuilder was still submitting work or was already waiting for upstream pass completion.
 - **After [KNOWN]:** The requirements now require an explicit runtime-visible handoff when repository-owned replay submission completes and the runtime begins waiting for upstream training-pass completion or an equivalent delegated lifecycle boundary.
 
+### BA-INDEXER-036
+
+- **Before [KNOWN]:** The requirements described the delegated streaming lifecycle in terms of training passes, built-in clustering factories, and training completion because that was the upstream surface previously integrated by LexonArchiveBuilder.
+- **After [KNOWN]:** The requirements describe the delegated streaming lifecycle in terms of the latest upstream planning-policy surface while preserving LexonArchiveBuilder's caller-visible stage contract and adapter-orchestrator role.
+
+### BA-INDEXER-037
+
+- **Before [KNOWN]:** The requirements assumed LexonArchiveBuilder would satisfy the upstream built-in clustering contract through the older `BuiltInClustering` and `BuiltInClusteringFactory` seam.
+- **After [KNOWN]:** The requirements preserve the same repository-level algorithm choices and option families, but require them to map onto the latest upstream built-in planning-policy seam instead.
+
+### BA-INDEXER-038
+
+- **Before [KNOWN]:** The requirements preserved repository invariants across upstream API changes, but they did not explicitly require distinguishing a true upstream feature regression from a mechanical API rename or lifecycle reshaping.
+- **After [KNOWN]:** The requirements explicitly require regression assessment for repository-relied-on capabilities so the upgrade cannot silently narrow behavior.
+
+### BA-INDEXER-039
+
+- **Before [KNOWN]:** Progress observability requirements assumed the older upstream status taxonomy that reported training and materialization phases using the prior names.
+- **After [KNOWN]:** The requirements preserve operator-visible progress continuity while allowing LexonArchiveBuilder to remap the latest upstream planning, hierarchy-planning, and bottom-up assembly phases onto the same repository-owned runtime progress surface.
+
+### BA-INDEXER-040
+
+- **Before [KNOWN]:** The requirements preserved stage-selection and MCP invariants during the earlier streaming-indexer migration, but they did not yet enumerate the repository-required capabilities that must survive the newest planning-policy upgrade review.
+- **After [KNOWN]:** The requirements explicitly preserve split-stage replay, algorithm selection, omitted `cluster_count` auto-sizing, progress projection, and unchanged MCP search-serving behavior as feature-level obligations for the latest upgrade.
+
 ## Requirements
 
 ### Functional Requirements
@@ -326,12 +362,13 @@ LexonArchiveBuilder SHALL delegate indexing and index creation to the `lexongrap
 
 LexonArchiveBuilder SHALL adapt the approved batch contract onto the replay-based streaming indexing APIs exposed by `lexongraph-streaming-indexer`.
 
-- **Required property [KNOWN]:** The delegated indexing flow must support the upstream lifecycle of one or more training passes, explicit training completion, and final materialization replay rather than depending on the superseded one-shot or pre-streaming incremental surface.
+- **Required property [KNOWN]:** The delegated indexing flow must support the latest upstream lifecycle of one or more planning passes, explicit planning completion, and final materialization replay rather than depending on the superseded training-oriented or pre-streaming surfaces.
 - **External-contract stability [KNOWN]:** LexonArchiveBuilder SHALL preserve the current caller-visible stage contract (`full`, `ingestion+embedding`, `clustering+block-assembly`) and SHALL NOT expose the raw upstream streaming lifecycle directly on the CLI or `BatchRequest`.
 - **Replay obligation [KNOWN]:** LexonArchiveBuilder SHALL preserve a deterministic delegated item stream, including stable item ordering and replay identity, anywhere the upstream streaming lifecycle requires caller replay.
 - **Boundary [KNOWN]:** LexonArchiveBuilder still does not own index-construction semantics; it consumes upstream streaming APIs rather than reimplementing indexing behavior in-repo.
+- **Compatibility note [KNOWN]:** The latest known upstream lifecycle renames the repository's previously consumed training-oriented seam to a planning-oriented seam and introduces hierarchy-planning plus bottom-up-assembly status phases behind the same delegated indexing boundary.
 - **Idempotence constraint [INFERRED]:** Adapting to replay-based streaming indexing must preserve the existing immutable, hash-addressed rerun expectations for unchanged content.
-- **Traceability:** UR-3, UR-8, UR-31, UR-45, UR-46, UR-48, UR-49
+- **Traceability:** UR-3, UR-8, UR-31, UR-45, UR-46, UR-48, UR-49, UR-61, UR-62, UR-63
 
 #### RQ-INDEXER-003B - Layer-parallel delegated block processing
 
@@ -417,9 +454,9 @@ LexonArchiveBuilder SHALL provide an explicit delegated clustering algorithm
 selection that satisfies the updated LexonGraph streaming indexer contract.
 
 - **Upstream contract [KNOWN]:** The delegated streaming indexer now requires the
-  caller to choose a clustering algorithm and pass the corresponding
+  caller to choose a built-in planning configuration and pass the corresponding
   algorithm-specific settings rather than relying on one implicit clustering
-  realization.
+  realization or the retired built-in clustering-factory seam.
 - **Current built-in algorithms [KNOWN]:**
   - `dcbc`
   - `directional-pca`
@@ -427,12 +464,13 @@ selection that satisfies the updated LexonGraph streaming indexer contract.
   `clustering+block-assembly` execution stages and does not affect
   `ingestion+embedding` execution.
 - **Delegation boundary [KNOWN]:** LexonArchiveBuilder still delegates all actual
-  clustering behavior to LexonGraph and does not define repository-local
-  clustering algorithms in this increment.
+  planning and clustering behavior to LexonGraph and does not define
+  repository-local planning or clustering algorithms in this increment.
 - **Default policy [KNOWN]:** When the caller omits clustering configuration,
   LexonArchiveBuilder SHALL apply a repository-owned default algorithm and
   default option values that remain compatible with the upstream contract.
-- **Traceability:** UR-39, UR-44, UR-50, UR-52, UR-53
+- **Compatibility note [KNOWN]:** The latest known upstream built-in planning seam continues to expose `dcbc` and `directional-pca` as the repository-relevant built-in choices, but LexonArchiveBuilder must now bind them through the planning-policy contract rather than through `BuiltInClusteringFactory`.
+- **Traceability:** UR-39, UR-44, UR-50, UR-52, UR-53, UR-61, UR-62, UR-65
 
 #### RQ-INDEXER-003G - Algorithm-specific clustering options on the CLI
 
@@ -483,6 +521,25 @@ specification and block-size target.
   branch constraints, LexonArchiveBuilder SHALL fail explicitly rather than
   silently falling back to an unsafe fixed default.
 - **Traceability:** UR-39, UR-43, UR-52, UR-53, UR-56, UR-57, UR-58
+
+#### RQ-INDEXER-003I - Upstream feature-regression containment
+
+When adapting to the latest LexonGraph version, LexonArchiveBuilder SHALL
+preserve every repository-required capability that remains semantically
+supported by the upstream contract and SHALL classify any missing capability as
+an explicit upstream regression instead of silently narrowing repository
+behavior.
+
+- **Repository-required capabilities [KNOWN]:**
+  - the external stage contract (`full`, `ingestion+embedding`, `clustering+block-assembly`)
+  - deterministic split-stage replay acceptance
+  - explicit built-in algorithm selection for `dcbc` and `directional-pca`
+  - omitted `cluster_count` auto-sizing with explicit override preservation
+  - runtime progress projection that keeps raw upstream lifecycle details behind the repository-owned progress surface
+  - unchanged MCP search-serving and retrieval behavior for already-indexed content
+- **Regression rule [INFERRED]:** If the latest upstream surface removes or weakens one of those capabilities, LexonArchiveBuilder SHALL treat that as a compatibility finding requiring explicit design and implementation handling, not as permission to drop the affected repository behavior.
+- **Boundary [KNOWN]:** This requirement does not force LexonArchiveBuilder to re-implement upstream planning internals in-repo; it constrains adaptation and regression reporting at the repository boundary.
+- **Traceability:** UR-47, UR-61, UR-63, UR-64, UR-65, UR-66
 
 #### RQ-INDEXER-004 - Content resolution integration
 
@@ -621,7 +678,7 @@ advances, and clustering or block assembly advances.
   visibility, indexed-item visibility, and clustering or block-assembly
   visibility so operators can tell that work is continuing before the final
   summary is emitted.
-- **Streaming lifecycle visibility [KNOWN]:** Progress output must remain meaningful across upstream training passes, training completion, and final materialization without requiring callers to understand raw upstream phase names.
+- **Streaming lifecycle visibility [KNOWN]:** Progress output must remain meaningful across upstream planning passes, planning completion, hierarchy-planning stages, and final materialization or bottom-up assembly without requiring callers to understand raw upstream phase names.
 - **Embedding-phase visibility [KNOWN]:** For any execution stage that includes ingestion plus embedding generation, progress output must continue after delegated items have been prepared and while local embedding or leaf-materialization work is still consuming those delegated items.
 - **Replay-submission visibility [KNOWN]:** For any execution stage that submits known replay batches to the delegated streaming API, including clustering-only execution reconstructed from stored leaf blocks, progress output must report repository-owned replay-batch submission completion in bounded work units using the known batch count and cumulative delegated-item count for the invocation.
 - **Phase-boundary clarity [KNOWN]:** When repository-owned replay-batch submission completes and LexonArchiveBuilder begins waiting for upstream training-pass completion or an equivalent delegated lifecycle boundary, the runtime progress stream must emit an explicit handoff message so operators can distinguish local submission completion from subsequent upstream observer heartbeats.
@@ -639,7 +696,7 @@ advances, and clustering or block assembly advances.
   runtime progress surface used for mailbox and delegated-indexing progress.
 - **Boundary discipline [INFERRED]:** Repository-owned progress messages SHOULD make clear when they describe local replay submission state versus upstream observer-reported training, clustering, or materialization state, even when the upstream observer does not expose in-phase processed-versus-remaining counts.
 - **Non-goal [KNOWN]:** This requirement does not introduce a separate control-plane, metrics backend, or MCP-surface change.
-- **Traceability:** UR-32, UR-33, UR-39, UR-41, UR-45, UR-48, UR-59, UR-60
+- **Traceability:** UR-32, UR-33, UR-39, UR-41, UR-45, UR-48, UR-59, UR-60, UR-61, UR-62, UR-63
 
 ### Boundary and Invariant Requirements
 
@@ -652,10 +709,10 @@ The indexer requirements SHALL remain limited to indexing-time orchestration and
 
 #### RQ-INDEXER-010A - Subordinate external contracts
 
-LexonArchiveBuilder SHALL remain subordinate to the public contracts owned by `lexongraph-streaming-indexer`, `lexongraph-streaming-clustering`, `lexongraph-block-store`, and `lexongraph-embeddings-trait` and SHALL NOT redefine their index-construction, replay-validation, block-identity, or embedding-contract semantics within this repository.
+LexonArchiveBuilder SHALL remain subordinate to the public contracts owned by `lexongraph-streaming-indexer`, `lexongraph-streaming-clustering`, `lexongraph-block-store`, and `lexongraph-embeddings-trait` and SHALL NOT redefine their index-construction, planning-policy, replay-validation, block-identity, or embedding-contract semantics within this repository.
 
 - **Rationale [KNOWN]:** Those semantics are already owned by the upstream LexonGraph crates and specifications.
-- **Traceability:** UR-3, UR-8, UR-9, UR-44, UR-45, UR-48
+- **Traceability:** UR-3, UR-8, UR-9, UR-44, UR-45, UR-48, UR-61, UR-62
 
 #### RQ-INDEXER-010B - Local block-store tooling interoperability
 
@@ -683,7 +740,7 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 ## Out of Scope
 
 - Defining indexing algorithms internal to LexonGraph indexing crates
-- Exposing the upstream streaming training/finalization lifecycle directly on the external CLI or `BatchRequest` contract in this increment
+- Exposing the upstream streaming planning or materialization lifecycle directly on the external CLI or `BatchRequest` contract in this increment
 - Redefining the public contracts of `ContentResolver<R>`, `BlockStore`, or `EmbeddingProvider`
 - Defining MCP query semantics or search ranking behavior
 - Re-specifying LexonGraph API batch recovery internals
@@ -709,15 +766,23 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 | Caller-visible indexing and MCP contracts remain stable across the upstream API migration | Preserved | The streaming lifecycle is constrained to an internal adaptation behind the existing stage surface and unchanged MCP retrieval semantics |
 | Clustering configuration remains explicit and replayable | Preserved with clarified scope | Requirements now treat the effective clustering algorithm and option set as part of clustering-enabled orchestration input and constrain defaults to resolve deterministically |
 | Omitted clustering-size behavior remains deterministic and safe across algorithms | Preserved with clarified scope | Requirements now constrain omitted `cluster_count` to derive from input count plus embedding-aware branch capacity for every supported built-in algorithm while preserving explicit caller override behavior |
+| Required repository capabilities remain distinguishable from upstream regressions during the latest upgrade | Preserved with clarified scope | The requirements now force the upgrade to classify missing capabilities explicitly instead of silently narrowing split-stage replay, planning-policy mapping, progress projection, or MCP-facing behavior |
 | Clients are not forced to parse raw mailbox blobs for ordinary retrieval | Preserved | Indexed chunks must reference normalized email artifacts so retrieval can stay at chunk level or expand to full normalized email through repository-owned artifacts |
 | Storage abstraction count stays bounded across environments | Preserved | Requirements now reuse the environment-selected `BlockStore` abstraction family for indexed blocks, normalized email artifacts, and mailbox provenance artifacts rather than introducing a second storage stack |
 | Local filesystem block stores remain interoperable with LexonGraph tooling | Preserved | The local/testing profile is now constrained to LexonGraph's filesystem naming/layout contract so inspection tools can consume repository-produced local stores |
 | Parallel execution does not weaken deterministic indexing semantics | Preserved | Leaf-layer concurrency is constrained by cross-layer barriers and idempotence requirements so scheduling policy does not become a semantic contract change |
 
+## Open Questions / Discovery Gaps
+
+- **Q-INDEXER-061 [UNKNOWN]:** Does the latest upstream planning-policy surface preserve exactly the same effective option semantics for `dcbc` balance constraints and `directional-pca` parameters that the repository already exposes, or only the same field names?
+- **Q-INDEXER-062 [UNKNOWN]:** Does the latest upstream status-observer contract expose enough information for LexonArchiveBuilder to preserve its current replay-submission handoff and long-running liveness messages without weakening operator visibility?
+- **Q-INDEXER-063 [UNKNOWN]:** Are any repository-required split-stage replay guarantees now expressed through different upstream lifecycle transitions beyond the observed rename from training completion to planning completion?
+
 ## Coverage Notes
 
 - **Covered sources [KNOWN]:**
   - user request in this session: "update the LexonGraph rust crates. The latest version contains a significant api change. Rebuild the indexer code to use the new LexonGraph streaming indexer. Maintain other invariants, update tests. When done, branch, commit, push, pr"
+  - user request in this session: "adapt implementation to latest lexongraph version and tell me if lexongraph regressed features we need so I can fix it."
   - user clarification in this session selecting: "Preserve the current external stage contract (Recommended)"
   - user clarification in this session selecting: "Yes, preserve MCP search/retrieval behavior (Recommended)"
   - user request in this session to adopt LexonGraph's incremental indexing APIs and emit visible mailbox/indexing progress during batch execution
@@ -727,6 +792,10 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
   - user clarification in this session selecting: "Fresh/rebuilt local store is acceptable"
   - user request in this session: "fix this behavior. It should always auto-size based on number of blocks to embededd and the embedding size"
   - user clarification in this session selecting: "Yes — explicit cluster_count overrides; auto-size only when omitted (Recommended)"
+  - `docs/specs/lexonarchivebuilder-indexer/design.md:228-315`
+  - `docs/specs/lexonarchivebuilder-indexer/validation.md:72-187`
+  - `crates/lexonarchivebuilder-indexer/src/runtime.rs:14-340`
+  - `Alan-Jowett/LexonGraph` `crates/lexongraph-streaming-indexer/src/lib.rs` on `main`: planning-policy and status-observer surfaces around `HierarchicalPlanningPolicy`, `BuiltInPlanningPolicy`, `StreamingIndexingPhase`, and `mark_planning_complete`
   - `README.md:18-27`
   - `README.md:42-49`
   - `README.md:51-59`

@@ -12,9 +12,8 @@ use lexongraph_block::{
 use lexongraph_block_store::{BlockStore, BlockStoreError};
 use lexongraph_embeddings_trait::{EmbeddingInput, EmbeddingProvider};
 use lexongraph_streaming_indexer::{
-    ArithmeticMeanCanonicalEmbeddingPolicy, BuiltInClustering, BuiltInClusteringFactory,
-    BuiltInStreamingClusterTrainer, ContentResolver, DcbcBuiltInClusteringSettings,
-    DirectionalPcaBuiltInClusteringSettings, IndexItem, StreamingClusteringFactory,
+    ArithmeticMeanCanonicalEmbeddingPolicy, BuiltInPlanning, ContentResolver,
+    DcbcBuiltInPlanningSettings, DirectionalPcaBuiltInPlanningSettings, IndexItem, PlanningStage,
     StreamingIndexerError, StreamingIndexingPhase, StreamingIndexingRun, StreamingIndexingStatus,
     StreamingIndexingStatusObserver, StreamingIndexingStatusState,
 };
@@ -122,10 +121,10 @@ impl SubmissionProgressKind {
     fn handoff_message(self, total_batches: usize, total_items: usize) -> String {
         match self {
             Self::Embedding => format!(
-                "Submitted all {total_batches} embedding batch(es); waiting for training pass completion over {total_items} delegated item(s)"
+                "Submitted all {total_batches} embedding batch(es); waiting for planning pass completion over {total_items} delegated item(s)"
             ),
             Self::Replay => format!(
-                "Submitted all {total_batches} replay batch(es); waiting for training pass completion over {total_items} delegated item(s)"
+                "Submitted all {total_batches} replay batch(es); waiting for planning pass completion over {total_items} delegated item(s)"
             ),
         }
     }
@@ -145,23 +144,22 @@ struct StoredLeafEmbeddingProvider {
     embeddings_by_input_hash: Arc<HashMap<[u8; 32], Vec<u8>>>,
 }
 
+#[derive(Clone, Debug)]
+struct RecordingEmbeddingProvider<EP> {
+    inner: EP,
+    embeddings_by_input_hash: Arc<std::sync::Mutex<HashMap<[u8; 32], Vec<u8>>>>,
+}
+
 #[derive(Debug, Error)]
 enum StoredLeafEmbeddingProviderError {
     #[error("no stored embedding was available for the requested replay input")]
     MissingStoredEmbedding,
 }
 
-#[derive(Clone, Debug)]
-struct AutoSizingBuiltInClusteringFactory {
-    clustering: ConfiguredClustering,
-}
-
 #[derive(Debug, Error)]
-enum AutoSizingBuiltInClusteringFactoryError {
+pub enum AutoSizingBuiltInPlanningError {
     #[error("failed to derive an auto-sized cluster count: {0}")]
     DeriveClusterCount(String),
-    #[error("failed to create a built-in clustering trainer: {0}")]
-    CreateTrainer(String),
 }
 
 impl StagedBlocks {
@@ -204,6 +202,8 @@ pub enum RuntimeError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Provider(#[from] ConfiguredEmbeddingProviderError),
+    #[error(transparent)]
+    Planning(#[from] AutoSizingBuiltInPlanningError),
     #[error(transparent)]
     Mailbox(#[from] MailboxExpansionError),
     #[error(transparent)]
@@ -274,54 +274,97 @@ impl EmbeddingProvider for StoredLeafEmbeddingProvider {
     }
 }
 
-impl AutoSizingBuiltInClusteringFactory {
-    fn new(clustering: ConfiguredClustering) -> Self {
-        Self { clustering }
+impl<EP> RecordingEmbeddingProvider<EP> {
+    fn new(inner: EP) -> Self {
+        Self {
+            inner,
+            embeddings_by_input_hash: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
     }
 }
 
-impl StreamingClusteringFactory for AutoSizingBuiltInClusteringFactory {
-    type Trainer = BuiltInStreamingClusterTrainer;
-    type Error = AutoSizingBuiltInClusteringFactoryError;
+impl<EP> EmbeddingProvider for RecordingEmbeddingProvider<EP>
+where
+    EP: EmbeddingProvider,
+{
+    type Error = EP::Error;
 
-    fn create_trainer(
+    async fn embed(
         &self,
-        dimensions: usize,
-        estimated_child_count: usize,
-        block_size_target: usize,
-        embedding_spec: &EmbeddingSpec,
-    ) -> Result<Self::Trainer, Self::Error> {
-        let clustering = resolved_built_in_clustering(
-            &self.clustering,
-            estimated_child_count,
-            block_size_target,
-            embedding_spec,
-        )?;
-        BuiltInClusteringFactory::new(clustering)
-            .create_trainer(
-                dimensions,
-                estimated_child_count,
-                block_size_target,
-                embedding_spec,
-            )
-            .map_err(|error| {
-                AutoSizingBuiltInClusteringFactoryError::CreateTrainer(error.to_string())
-            })
+        input: &EmbeddingInput,
+        spec: &EmbeddingSpec,
+    ) -> Result<Vec<u8>, Self::Error> {
+        let key = hash_embedding_input(input).into_bytes();
+        if let Some(embedding) = self
+            .embeddings_by_input_hash
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+        {
+            return Ok(embedding);
+        }
+
+        let embedding = self.inner.embed(input, spec).await?;
+        self.embeddings_by_input_hash
+            .lock()
+            .unwrap()
+            .insert(key, embedding.clone());
+        Ok(embedding)
+    }
+
+    async fn embed_batch(
+        &self,
+        inputs: &[EmbeddingInput],
+        spec: &EmbeddingSpec,
+    ) -> Result<Vec<Vec<u8>>, Self::Error> {
+        let mut embeddings = vec![None; inputs.len()];
+        let mut missing_indices = Vec::new();
+        let mut missing_inputs = Vec::new();
+        {
+            let cache = self.embeddings_by_input_hash.lock().unwrap();
+            for (index, input) in inputs.iter().enumerate() {
+                let key = hash_embedding_input(input).into_bytes();
+                if let Some(embedding) = cache.get(&key) {
+                    embeddings[index] = Some(embedding.clone());
+                } else {
+                    missing_indices.push(index);
+                    missing_inputs.push(input.clone());
+                }
+            }
+        }
+        if missing_inputs.is_empty() {
+            return Ok(embeddings.into_iter().map(Option::unwrap).collect());
+        }
+
+        let fetched_embeddings = self.inner.embed_batch(&missing_inputs, spec).await?;
+        {
+            let mut cache = self.embeddings_by_input_hash.lock().unwrap();
+            for ((index, input), embedding) in missing_indices
+                .into_iter()
+                .zip(missing_inputs.iter())
+                .zip(fetched_embeddings.into_iter())
+            {
+                cache.insert(hash_embedding_input(input).into_bytes(), embedding.clone());
+                embeddings[index] = Some(embedding);
+            }
+        }
+        Ok(embeddings.into_iter().map(Option::unwrap).collect())
     }
 }
 
-fn resolved_built_in_clustering(
+fn resolved_built_in_planning(
     clustering: &ConfiguredClustering,
     estimated_child_count: usize,
     block_size_target: usize,
     embedding_spec: &EmbeddingSpec,
-) -> Result<BuiltInClustering, AutoSizingBuiltInClusteringFactoryError> {
+) -> Result<BuiltInPlanning, AutoSizingBuiltInPlanningError> {
     Ok(match clustering {
         ConfiguredClustering::Dcbc {
             cluster_count,
             balance_constraints,
             random_seed,
-        } => BuiltInClustering::Dcbc(DcbcBuiltInClusteringSettings {
+        } => BuiltInPlanning::Dcbc(DcbcBuiltInPlanningSettings {
             cluster_count: resolve_cluster_count(
                 *cluster_count,
                 1,
@@ -336,7 +379,7 @@ fn resolved_built_in_clustering(
             cluster_count,
             random_seed,
             params,
-        } => BuiltInClustering::DirectionalPca(DirectionalPcaBuiltInClusteringSettings {
+        } => BuiltInPlanning::DirectionalPca(DirectionalPcaBuiltInPlanningSettings {
             cluster_count: resolve_cluster_count(
                 *cluster_count,
                 params.retained_dimension_count.max(1),
@@ -356,7 +399,7 @@ fn resolve_cluster_count(
     estimated_child_count: usize,
     block_size_target: usize,
     embedding_spec: &EmbeddingSpec,
-) -> Result<u32, AutoSizingBuiltInClusteringFactoryError> {
+) -> Result<u32, AutoSizingBuiltInPlanningError> {
     match explicit_cluster_count {
         Some(cluster_count) => Ok(cluster_count),
         None => derive_auto_sized_cluster_count(
@@ -373,36 +416,32 @@ fn derive_auto_sized_cluster_count(
     estimated_child_count: usize,
     block_size_target: usize,
     embedding_spec: &EmbeddingSpec,
-) -> Result<u32, AutoSizingBuiltInClusteringFactoryError> {
+) -> Result<u32, AutoSizingBuiltInPlanningError> {
     let minimum_cluster_count = minimum_cluster_count.max(1);
     if estimated_child_count == 0 {
         return u32::try_from(minimum_cluster_count).map_err(|_| {
-            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+            AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
                 "minimum cluster count {minimum_cluster_count} exceeds u32::MAX"
             ))
         });
     }
     if minimum_cluster_count > estimated_child_count {
-        return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
-            format!(
-                "cannot satisfy minimum cluster count {minimum_cluster_count} for only {estimated_child_count} clustering inputs"
-            ),
-        ));
+        return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
+            "cannot satisfy minimum cluster count {minimum_cluster_count} for only {estimated_child_count} clustering inputs"
+        )));
     }
 
     let max_per =
         max_children_per_branch(embedding_spec, block_size_target, estimated_child_count)?;
     let max_sensible = estimated_child_count / 2;
     if estimated_child_count > 1 && minimum_cluster_count > max_sensible {
-        return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
-            format!(
-                "cannot satisfy minimum cluster count {minimum_cluster_count} and two-children-per-branch constraint for {estimated_child_count} children with block size target {block_size_target}"
-            ),
-        ));
+        return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
+            "cannot satisfy minimum cluster count {minimum_cluster_count} and two-children-per-branch constraint for {estimated_child_count} children with block size target {block_size_target}"
+        )));
     }
     if estimated_child_count <= max_per.max(1) {
         return u32::try_from(minimum_cluster_count).map_err(|_| {
-            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+            AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
                 "minimum cluster count {minimum_cluster_count} exceeds u32::MAX"
             ))
         });
@@ -412,15 +451,13 @@ fn derive_auto_sized_cluster_count(
         .div_ceil(max_per.max(2))
         .max(minimum_cluster_count);
     if needed > max_sensible {
-        return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
-            format!(
-                "cannot satisfy minimum cluster count {minimum_cluster_count} and two-children-per-branch constraint for {estimated_child_count} children with block size target {block_size_target}"
-            ),
-        ));
+        return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
+            "cannot satisfy minimum cluster count {minimum_cluster_count} and two-children-per-branch constraint for {estimated_child_count} children with block size target {block_size_target}"
+        )));
     }
 
     u32::try_from(needed).map_err(|_| {
-        AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+        AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
             "derived cluster count {needed} exceeds u32::MAX for estimated child count {estimated_child_count}"
         ))
     })
@@ -430,18 +467,16 @@ fn max_children_per_branch(
     embedding_spec: &EmbeddingSpec,
     block_size_target: usize,
     child_count: usize,
-) -> Result<usize, AutoSizingBuiltInClusteringFactoryError> {
+) -> Result<usize, AutoSizingBuiltInPlanningError> {
     if child_count < 2 {
         return Ok(child_count);
     }
 
     let min_size = serialized_branch_size(embedding_spec, 2)?;
     if min_size > block_size_target {
-        return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
-            format!(
-                "minimum 2-child branch serializes to {min_size} bytes, exceeding block size target {block_size_target}"
-            ),
-        ));
+        return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
+            "minimum 2-child branch serializes to {min_size} bytes, exceeding block size target {block_size_target}"
+        )));
     }
 
     let mut low = 2;
@@ -473,9 +508,9 @@ fn max_children_per_branch(
 fn serialized_branch_size(
     embedding_spec: &EmbeddingSpec,
     entry_count: usize,
-) -> Result<usize, AutoSizingBuiltInClusteringFactoryError> {
+) -> Result<usize, AutoSizingBuiltInPlanningError> {
     if entry_count < 2 {
-        return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
+        return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(
             "branch-size estimation requires at least two entries".into(),
         ));
     }
@@ -496,12 +531,12 @@ fn serialized_branch_size(
 
     top_level_size
         .checked_add(entry_size.checked_mul(entry_count).ok_or_else(|| {
-            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+            AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
                 "branch-size estimation overflow for {entry_count} entries"
             ))
         })?)
         .ok_or_else(|| {
-            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+            AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
                 "branch-size estimation overflow for {entry_count} entries"
             ))
         })
@@ -509,14 +544,14 @@ fn serialized_branch_size(
 
 fn expected_embedding_len(
     embedding_spec: &EmbeddingSpec,
-) -> Result<usize, AutoSizingBuiltInClusteringFactoryError> {
+) -> Result<usize, AutoSizingBuiltInPlanningError> {
     let scalar_width = match embedding_spec.encoding.as_str() {
         "f32le" => 4_u64,
         "f16le" => 2_u64,
         other => {
-            return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
-                format!("unsupported embedding encoding {other:?} for branch-size estimation"),
-            ));
+            return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
+                "unsupported embedding encoding {other:?} for branch-size estimation"
+            )));
         }
     };
     embedding_spec
@@ -524,7 +559,7 @@ fn expected_embedding_len(
         .checked_mul(scalar_width)
         .and_then(|length| usize::try_from(length).ok())
         .ok_or_else(|| {
-            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+            AutoSizingBuiltInPlanningError::DeriveClusterCount(format!(
                 "embedding length overflow for {} dimensions with encoding {:?}",
                 embedding_spec.dims, embedding_spec.encoding
             ))
@@ -688,8 +723,9 @@ where
             &progress,
         )?;
         request.environment.local_embedding()?;
-        let embedding_provider =
-            ConfiguredEmbeddingProvider::from_environment(&request.environment)?;
+        let embedding_provider = RecordingEmbeddingProvider::new(
+            ConfiguredEmbeddingProvider::from_environment(&request.environment)?,
+        );
         return run_streaming_stage(
             resolver,
             embedding_provider,
@@ -1041,11 +1077,16 @@ where
     let total_batches = replay_batches.len();
     let total_items: usize = replay_batches.iter().map(|batch| batch.items.len()).sum();
 
-    let mut indexer = StreamingIndexingRun::new(
+    let mut indexer = StreamingIndexingRun::with_canonical_policy(
         resolver,
         embedding_provider,
         ArithmeticMeanCanonicalEmbeddingPolicy,
-        AutoSizingBuiltInClusteringFactory::new(config.clustering),
+        resolved_built_in_planning(
+            &config.clustering,
+            total_items,
+            config.block_size_target,
+            embedding_spec,
+        )?,
         embedding_spec.clone(),
         config.block_size_target,
     );
@@ -1101,14 +1142,14 @@ where
     report_progress(
         progress,
         format!(
-            "Completed training pass {} over {} item(s)",
+            "Completed planning pass {} over {} item(s)",
             pass_report.completed_pass_count, pass_report.observed_item_count
         ),
     );
-    indexer.mark_training_complete()?;
+    indexer.mark_planning_complete()?;
     report_progress(
         progress,
-        "Streaming training complete; starting final materialization".into(),
+        "Streaming planning complete; starting final materialization".into(),
     );
     let result = indexer
         .finalize(
@@ -1291,136 +1332,140 @@ fn make_status_observer(progress: ProgressReporter) -> StreamingIndexingStatusOb
     })
 }
 
+fn format_planning_stage(stage: PlanningStage) -> &'static str {
+    match stage {
+        PlanningStage::Single => "single-stage planning",
+        PlanningStage::Coarse => "coarse planning",
+        PlanningStage::Fine => "fine planning",
+        PlanningStage::Custom => "custom planning",
+    }
+}
+
 fn format_indexing_status(status: StreamingIndexingStatus) -> String {
     let elapsed_ms = status.elapsed.as_millis();
     match (status.phase, status.state) {
         (
-            StreamingIndexingPhase::TrainingPass { pass_number },
+            StreamingIndexingPhase::PlanningPass { pass_number },
             StreamingIndexingStatusState::Started,
         ) => format!(
-            "Training pass {pass_number} started for {} item(s)",
+            "Planning pass {pass_number} started for {} item(s)",
             status.item_count
         ),
         (
-            StreamingIndexingPhase::TrainingPass { pass_number },
+            StreamingIndexingPhase::PlanningPass { pass_number },
             StreamingIndexingStatusState::InProgress,
         ) => format!(
-            "Training pass {pass_number} still running after {elapsed_ms} ms for {} item(s)",
+            "Planning pass {pass_number} still running after {elapsed_ms} ms for {} item(s)",
             status.item_count
         ),
         (
-            StreamingIndexingPhase::TrainingPass { pass_number },
+            StreamingIndexingPhase::PlanningPass { pass_number },
             StreamingIndexingStatusState::Completed,
         ) => format!(
-            "Training pass {pass_number} completed in {elapsed_ms} ms for {} item(s)",
+            "Planning pass {pass_number} completed in {elapsed_ms} ms for {} item(s)",
             status.item_count
         ),
         (
-            StreamingIndexingPhase::TrainingPass { pass_number },
+            StreamingIndexingPhase::PlanningPass { pass_number },
             StreamingIndexingStatusState::Failed,
         ) => format!(
-            "Training pass {pass_number} failed after {elapsed_ms} ms: {}",
+            "Planning pass {pass_number} failed after {elapsed_ms} ms: {}",
             status.error.unwrap_or_else(|| "unknown error".into())
         ),
-        (StreamingIndexingPhase::LeafMaterialization, StreamingIndexingStatusState::Started) => {
+        (
+            StreamingIndexingPhase::HierarchyPlanning { stage },
+            StreamingIndexingStatusState::Started,
+        ) => {
             format!(
-                "Leaf materialization started for {} item(s)",
-                status.item_count
-            )
-        }
-        (StreamingIndexingPhase::LeafMaterialization, StreamingIndexingStatusState::InProgress) => {
-            format!(
-                "Leaf materialization still running after {elapsed_ms} ms for {} item(s)",
-                status.item_count
-            )
-        }
-        (StreamingIndexingPhase::LeafMaterialization, StreamingIndexingStatusState::Completed) => {
-            format!(
-                "Leaf materialization completed in {elapsed_ms} ms for {} item(s)",
-                status.item_count
-            )
-        }
-        (StreamingIndexingPhase::LeafMaterialization, StreamingIndexingStatusState::Failed) => {
-            format!(
-                "Leaf materialization failed after {elapsed_ms} ms: {}",
-                status.error.unwrap_or_else(|| "unknown error".into())
-            )
-        }
-        (StreamingIndexingPhase::FirstLayerClustering, StreamingIndexingStatusState::Started) => {
-            format!(
-                "Clustering layer 0 started for {} child block(s)",
-                status.item_count
+                "{} started for {} item(s)",
+                format_planning_stage(stage),
+                status.item_count,
             )
         }
         (
-            StreamingIndexingPhase::FirstLayerClustering,
+            StreamingIndexingPhase::HierarchyPlanning { stage },
             StreamingIndexingStatusState::InProgress,
-        ) => format!(
-            "Clustering layer 0 still running after {elapsed_ms} ms for {} child block(s)",
-            status.item_count
-        ),
-        (StreamingIndexingPhase::FirstLayerClustering, StreamingIndexingStatusState::Completed) => {
+        ) => {
             format!(
-                "Clustering layer 0 completed in {elapsed_ms} ms for {} child block(s)",
-                status.item_count
+                "{} still running after {elapsed_ms} ms for {} item(s)",
+                format_planning_stage(stage),
+                status.item_count,
             )
         }
-        (StreamingIndexingPhase::FirstLayerClustering, StreamingIndexingStatusState::Failed) => {
+        (
+            StreamingIndexingPhase::HierarchyPlanning { stage },
+            StreamingIndexingStatusState::Completed,
+        ) => {
             format!(
-                "Clustering layer 0 failed after {elapsed_ms} ms: {}",
+                "{} completed in {elapsed_ms} ms for {} item(s)",
+                format_planning_stage(stage),
+                status.item_count,
+            )
+        }
+        (
+            StreamingIndexingPhase::HierarchyPlanning { stage },
+            StreamingIndexingStatusState::Failed,
+        ) => {
+            format!(
+                "{} failed after {elapsed_ms} ms: {}",
+                format_planning_stage(stage),
                 status.error.unwrap_or_else(|| "unknown error".into())
             )
         }
         (
-            StreamingIndexingPhase::HigherLayerClustering { layer_index },
+            StreamingIndexingPhase::FinalMaterializationReplay,
             StreamingIndexingStatusState::Started,
-        ) => format!(
-            "Clustering layer {layer_index} started for {} child block(s)",
-            status.item_count
-        ),
+        ) => {
+            format!(
+                "Final materialization replay started for {} item(s)",
+                status.item_count
+            )
+        }
         (
-            StreamingIndexingPhase::HigherLayerClustering { layer_index },
+            StreamingIndexingPhase::FinalMaterializationReplay,
             StreamingIndexingStatusState::InProgress,
         ) => format!(
-            "Clustering layer {layer_index} still running after {elapsed_ms} ms for {} child block(s)",
+            "Final materialization replay still running after {elapsed_ms} ms for {} item(s)",
             status.item_count
         ),
         (
-            StreamingIndexingPhase::HigherLayerClustering { layer_index },
+            StreamingIndexingPhase::FinalMaterializationReplay,
             StreamingIndexingStatusState::Completed,
         ) => format!(
-            "Clustering layer {layer_index} completed in {elapsed_ms} ms for {} child block(s)",
+            "Final materialization replay completed in {elapsed_ms} ms for {} item(s)",
             status.item_count
         ),
         (
-            StreamingIndexingPhase::HigherLayerClustering { layer_index },
+            StreamingIndexingPhase::FinalMaterializationReplay,
             StreamingIndexingStatusState::Failed,
         ) => format!(
-            "Clustering layer {layer_index} failed after {elapsed_ms} ms: {}",
+            "Final materialization replay failed after {elapsed_ms} ms: {}",
             status.error.unwrap_or_else(|| "unknown error".into())
         ),
         (
-            StreamingIndexingPhase::LayerMaterialization { layer_index },
+            StreamingIndexingPhase::BottomUpAssembly { layer_index },
+            StreamingIndexingStatusState::Started,
+        ) => format!("Bottom-up assembly for layer {layer_index} started after {elapsed_ms} ms"),
+        (
+            StreamingIndexingPhase::BottomUpAssembly { layer_index },
+            StreamingIndexingStatusState::InProgress,
+        ) => format!(
+            "Bottom-up assembly for layer {layer_index} still running after {elapsed_ms} ms"
+        ),
+        (
+            StreamingIndexingPhase::BottomUpAssembly { layer_index },
             StreamingIndexingStatusState::Completed,
         ) => format!(
-            "Materialized parent layer {layer_index} in {elapsed_ms} ms: {} block(s)",
+            "Bottom-up assembly for layer {layer_index} completed in {elapsed_ms} ms: {} block(s)",
             status.item_count
         ),
         (
-            StreamingIndexingPhase::LayerMaterialization { layer_index },
+            StreamingIndexingPhase::BottomUpAssembly { layer_index },
             StreamingIndexingStatusState::Failed,
         ) => format!(
-            "Materializing parent layer {layer_index} failed after {elapsed_ms} ms: {}",
+            "Bottom-up assembly for layer {layer_index} failed after {elapsed_ms} ms: {}",
             status.error.unwrap_or_else(|| "unknown error".into())
         ),
-        (
-            StreamingIndexingPhase::LayerMaterialization { layer_index },
-            StreamingIndexingStatusState::Started,
-        )
-        | (
-            StreamingIndexingPhase::LayerMaterialization { layer_index },
-            StreamingIndexingStatusState::InProgress,
-        ) => format!("Materializing parent layer {layer_index} after {elapsed_ms} ms"),
     }
 }
 
@@ -1706,20 +1751,20 @@ mod tests {
         assert!(
             progress
                 .iter()
-                .any(|line| line.contains("Clustering layer 0 started"))
+                .any(|line| line.contains("Planning pass 1 started"))
         );
         assert!(
             progress
                 .iter()
-                .any(|line| line.contains("Materialized parent layer 0"))
+                .any(|line| line.contains("Bottom-up assembly for layer 0 completed"))
         );
         assert!(
             progress
                 .iter()
-                .any(|line| line.contains("Streaming training complete"))
+                .any(|line| line.contains("Streaming planning complete"))
         );
         assert!(progress.iter().any(|line| {
-            line.contains("embedding batch(es); waiting for training pass completion")
+            line.contains("embedding batch(es); waiting for planning pass completion")
         }));
         server.join();
     }
@@ -1813,13 +1858,13 @@ mod tests {
                 && line.contains("completed 5 of 5 delegated item(s)")
         }));
         assert!(progress.iter().any(|line| {
-            line.contains("Submitted all 3 replay batch(es); waiting for training pass completion")
+            line.contains("Submitted all 3 replay batch(es); waiting for planning pass completion")
                 && line.contains("5 delegated item(s)")
         }));
         assert!(
             progress
                 .iter()
-                .any(|line| line.contains("Training pass 1 started for 5 item(s)"))
+                .any(|line| line.contains("Planning pass 1 started for 5 item(s)"))
         );
         server.join();
     }
@@ -2084,7 +2129,7 @@ mod tests {
             fs::write(temp.path().join(format!("{name}.txt")), format!("{name}\n")).unwrap();
         }
 
-        let server = spawn_embedding_server(3);
+        let server = spawn_embedding_server(6);
         let request_path = temp.path().join("request.json");
         fs::write(
             &request_path,
@@ -2264,7 +2309,7 @@ mod tests {
             encoding: "f32le".into(),
         };
         let block_size_target = serialized_branch_size(&embedding_spec, 3).unwrap();
-        let omitted = resolved_built_in_clustering(
+        let omitted = resolved_built_in_planning(
             &ConfiguredClustering::DirectionalPca {
                 cluster_count: None,
                 random_seed: None,
@@ -2282,7 +2327,7 @@ mod tests {
             &embedding_spec,
         )
         .unwrap();
-        let explicit = resolved_built_in_clustering(
+        let explicit = resolved_built_in_planning(
             &ConfiguredClustering::DirectionalPca {
                 cluster_count: Some(3),
                 random_seed: None,
@@ -2311,7 +2356,7 @@ mod tests {
             encoding: "f32le".into(),
         };
         let block_size_target = serialized_branch_size(&embedding_spec, 3).unwrap();
-        let omitted = resolved_built_in_clustering(
+        let omitted = resolved_built_in_planning(
             &ConfiguredClustering::Dcbc {
                 cluster_count: None,
                 balance_constraints: None,
@@ -2322,7 +2367,7 @@ mod tests {
             &embedding_spec,
         )
         .unwrap();
-        let explicit = resolved_built_in_clustering(
+        let explicit = resolved_built_in_planning(
             &ConfiguredClustering::Dcbc {
                 cluster_count: Some(3),
                 balance_constraints: None,
@@ -2345,7 +2390,7 @@ mod tests {
         };
         let block_size_target = serialized_branch_size(&embedding_spec, 3).unwrap();
 
-        let omitted = resolved_built_in_clustering(
+        let omitted = resolved_built_in_planning(
             &ConfiguredClustering::DirectionalPca {
                 cluster_count: None,
                 random_seed: None,
@@ -2365,10 +2410,11 @@ mod tests {
         .unwrap();
 
         match omitted {
-            BuiltInClustering::DirectionalPca(settings) => {
+            BuiltInPlanning::DirectionalPca(settings) => {
                 assert_eq!(settings.cluster_count, 3);
             }
-            BuiltInClustering::Dcbc(_) => panic!("expected directional-pca settings"),
+            BuiltInPlanning::Dcbc(_) => panic!("expected directional-pca settings"),
+            BuiltInPlanning::Hybrid(_) => panic!("expected directional-pca settings"),
         }
     }
 

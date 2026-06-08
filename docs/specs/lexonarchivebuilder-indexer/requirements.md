@@ -67,7 +67,7 @@
 - **UR-57 [KNOWN]:** This auto-sizing rule should apply consistently to both built-in clustering algorithms currently exposed by LexonGraph.
 - **UR-58 [KNOWN]:** An explicit caller-supplied `cluster_count` should continue to override auto-sizing; the derived count is only for the omitted-option path.
 - **UR-59 [KNOWN]:** During clustering-only replay, LexonArchiveBuilder should report repository-owned replay-batch submission progress using the batch count and cumulative delegated-item count it already knows, so operators can see how much work has been submitted to the streaming API.
-- **UR-60 [KNOWN]:** When LexonArchiveBuilder finishes submitting replay batches and begins waiting for upstream training-pass completion, the runtime progress stream should emit an explicit phase-boundary message so operators can distinguish local submission progress from upstream training-pass heartbeats.
+- **UR-60 [KNOWN]:** When LexonArchiveBuilder finishes submitting replay batches and begins waiting for upstream planning-pass completion, the runtime progress stream should emit an explicit phase-boundary message so operators can distinguish local submission progress from upstream planning-pass heartbeats.
 - **UR-61 [KNOWN]:** Adapt LexonArchiveBuilder to the latest LexonGraph version currently published on the upstream `main` branch.
 - **UR-62 [KNOWN]:** The latest LexonGraph streaming indexer replaces the older training-oriented built-in clustering factory surface with a planning-policy surface, including `HierarchicalPlanningPolicy`, `BuiltInPlanningPolicy`, planning passes, explicit planning completion, hierarchy-planning status phases, and bottom-up assembly status phases.
 - **UR-63 [KNOWN]:** Preserve the current external stage contract (`full`, `ingestion+embedding`, `clustering+block-assembly`) and existing MCP search or retrieval behavior for already-indexed content while adapting to the latest upstream indexing API.
@@ -302,7 +302,7 @@
 
 ### BA-INDEXER-035
 
-- **Before [KNOWN]:** Runtime progress could transition from repository-owned replay submission into upstream training-pass heartbeats without an explicit boundary marker, so operators could not tell whether LexonArchiveBuilder was still submitting work or was already waiting for upstream pass completion.
+- **Before [KNOWN]:** Runtime progress could transition from repository-owned replay submission into upstream planning-pass heartbeats without an explicit boundary marker, so operators could not tell whether LexonArchiveBuilder was still submitting work or was already waiting for upstream pass completion.
 - **After [KNOWN]:** The requirements now require an explicit runtime-visible handoff when repository-owned replay submission completes and the runtime begins waiting for upstream planning-pass completion or an equivalent delegated lifecycle boundary.
 
 ### BA-INDEXER-036
@@ -705,7 +705,7 @@ advances, and clustering or block assembly advances.
 - **Streaming lifecycle visibility [KNOWN]:** Progress output must remain meaningful across upstream planning passes, planning completion, hierarchy-planning stages, and final materialization or bottom-up assembly without requiring callers to understand raw upstream phase names.
 - **Embedding-phase visibility [KNOWN]:** For any execution stage that includes ingestion plus embedding generation, progress output must continue after delegated items have been prepared and while local embedding or leaf-materialization work is still consuming those delegated items.
 - **Replay-submission visibility [KNOWN]:** For any execution stage that submits known replay batches to the delegated streaming API, including clustering-only execution reconstructed from stored leaf blocks, progress output must report repository-owned replay-batch submission completion in bounded work units using the known batch count and cumulative delegated-item count for the invocation.
-- **Phase-boundary clarity [KNOWN]:** When repository-owned replay-batch submission completes and LexonArchiveBuilder begins waiting for upstream training-pass completion or an equivalent delegated lifecycle boundary, the runtime progress stream must emit an explicit handoff message so operators can distinguish local submission completion from subsequent upstream observer heartbeats.
+- **Phase-boundary clarity [KNOWN]:** When repository-owned replay-batch submission completes and LexonArchiveBuilder begins waiting for upstream planning-pass completion or an equivalent delegated lifecycle boundary, the runtime progress stream must emit an explicit handoff message so operators can distinguish local submission completion from subsequent upstream observer heartbeats.
 - **Gap constraint [INFERRED]:** A non-empty ingestion-plus-embedding run SHALL NOT rely on one mailbox-preparation message and then remain silent until the first downstream streaming-status event or final summary; operators must receive continued liveness or completed-work visibility while delegated embedding work remains outstanding.
 - **Cadence boundary [INFERRED]:** The requirements do not fix an exact log-line schema or interval, but the runtime-visible signal must advance by bounded work units or bounded elapsed time rather than only at phase boundaries.
 - **Surface [KNOWN]:** Progress output should be emitted on the normal

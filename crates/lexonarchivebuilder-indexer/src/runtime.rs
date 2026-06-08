@@ -1894,7 +1894,7 @@ pub fn write_summary_file(path: &Path, summary: &BatchSummary) -> Result<(), Run
 fn adjacent_output_directory(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
+        .unwrap_or_else(|| Path::new(""))
 }
 
 pub fn clustering_failure_diagnostics_path(

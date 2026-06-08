@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+use half::f16;
 use lexongraph_block::{
     Block, BlockError, BlockHash, EmbeddingSpec, LeafEntry, SerializedBlock, VERSION_1,
     build_leaf_block, deserialize_block, serialize_block,
@@ -64,6 +65,8 @@ pub struct ClusteringFailureDiagnostics {
     embedding_spec: ClusteringFailureEmbeddingSpec,
     block_size_target: usize,
     clustering: EffectiveClusteringDiagnostics,
+    embedding_health: EmbeddingHealthDiagnostics,
+    failing_subset: Option<FailingSubsetDiagnostics>,
     input_count: usize,
     inputs: Vec<ClusteringFailureInput>,
 }
@@ -118,6 +121,65 @@ enum ClusteringFailureInput {
         email_artifact_ref: String,
         chunk_index: usize,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct EmbeddingHealthDiagnostics {
+    available_embedding_count: usize,
+    missing_embedding_count: usize,
+    undecodable_embedding_count: usize,
+    non_finite_embedding_count: usize,
+    zero_vector_count: usize,
+    repeated_embedding_count: usize,
+    unique_embedding_count: usize,
+    min_l2_norm: Option<f64>,
+    max_l2_norm: Option<f64>,
+    mean_l2_norm: Option<f64>,
+    non_zero_variance_dimension_count: Option<usize>,
+    max_component_variance: Option<f64>,
+    suspicious_input_sample: Vec<SuspiciousClusteringFailureInput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct SuspiciousClusteringFailureInput {
+    input: ClusteringFailureInput,
+    reasons: Vec<String>,
+    embedding_fingerprint: Option<String>,
+    l2_norm: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct FailingSubsetDiagnostics {
+    phase: FailingSubsetPhaseDiagnostics,
+    provenance: FailingSubsetProvenance,
+    basis: String,
+    upstream_active_item_count: usize,
+    upstream_completed_unit_count: usize,
+    upstream_phase_total_unit_count: Option<usize>,
+    repository_visible_subset: RepositoryVisibleSubsetDiagnostics,
+    embedding_health: EmbeddingHealthDiagnostics,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "phase", rename_all = "kebab-case")]
+enum FailingSubsetPhaseDiagnostics {
+    PlanningPass { pass_number: usize },
+    HierarchyPlanning { stage: String },
+    FinalMaterializationReplay,
+    BottomUpAssembly { layer_index: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum FailingSubsetProvenance {
+    Exact,
+    NarrowestProvable,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum RepositoryVisibleSubsetDiagnostics {
+    SameAsTopLevelAttempt { input_count: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,6 +280,10 @@ struct RecordingEmbeddingProvider<EP> {
 enum StoredLeafEmbeddingProviderError {
     #[error("no stored embedding was available for the requested replay input")]
     MissingStoredEmbedding,
+}
+
+trait ClusteringFailureEmbeddingSource {
+    fn embedding_for_hash(&self, input_hash: &[u8; 32]) -> Option<Vec<u8>>;
 }
 
 #[derive(Debug, Error)]
@@ -364,12 +430,26 @@ impl EmbeddingProvider for StoredLeafEmbeddingProvider {
     }
 }
 
+impl ClusteringFailureEmbeddingSource for StoredLeafEmbeddingProvider {
+    fn embedding_for_hash(&self, input_hash: &[u8; 32]) -> Option<Vec<u8>> {
+        self.embeddings_by_input_hash.get(input_hash).cloned()
+    }
+}
+
 impl<EP> RecordingEmbeddingProvider<EP> {
     fn new(inner: EP) -> Self {
         Self {
             inner,
             embeddings_by_input_hash: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl<EP> ClusteringFailureEmbeddingSource for RecordingEmbeddingProvider<EP> {
+    fn embedding_for_hash(&self, input_hash: &[u8; 32]) -> Option<Vec<u8>> {
+        lock_unpoisoned(&self.embeddings_by_input_hash)
+            .get(input_hash)
+            .cloned()
     }
 }
 
@@ -577,7 +657,286 @@ fn effective_clustering_diagnostics(
     })
 }
 
+const SUSPICIOUS_INPUT_SAMPLE_LIMIT: usize = 5;
+const VARIANCE_EPSILON: f64 = 1e-12;
+
+#[derive(Clone, Debug, Default)]
+struct EmbeddingObservation {
+    fingerprint: Option<String>,
+    l2_norm: Option<f64>,
+    missing: bool,
+    undecodable: bool,
+    non_finite: bool,
+    zero_vector: bool,
+}
+
+fn build_embedding_health_diagnostics(
+    resolver: &LocalFilesystemContentResolver,
+    embedding_source: &dyn ClusteringFailureEmbeddingSource,
+    replay_batches: &[ReplayBatch],
+    inputs: &[ClusteringFailureInput],
+    embedding_spec: &EmbeddingSpec,
+) -> EmbeddingHealthDiagnostics {
+    let mut available_embedding_count = 0usize;
+    let mut missing_embedding_count = 0usize;
+    let mut undecodable_embedding_count = 0usize;
+    let mut non_finite_embedding_count = 0usize;
+    let mut zero_vector_count = 0usize;
+    let mut fingerprint_counts = HashMap::<String, usize>::new();
+    let mut norm_sum = 0.0f64;
+    let mut min_l2_norm = None::<f64>;
+    let mut max_l2_norm = None::<f64>;
+    let mut observations = Vec::with_capacity(inputs.len());
+
+    let dimension_count = usize::try_from(embedding_spec.dims).ok();
+    let mut component_sums = dimension_count.map(|dims| vec![0.0f64; dims]);
+    let mut component_square_sums = dimension_count.map(|dims| vec![0.0f64; dims]);
+    let mut finite_embedding_count = 0usize;
+
+    for item in replay_batches.iter().flat_map(|batch| batch.items.iter()) {
+        let Some(content) = resolver.resolve(&item.content_ref).ok() else {
+            missing_embedding_count += 1;
+            observations.push(EmbeddingObservation {
+                missing: true,
+                ..EmbeddingObservation::default()
+            });
+            continue;
+        };
+        let input_hash = hash_embedding_content(&content.media_type, &content.body).into_bytes();
+        let Some(embedding_bytes) = embedding_source.embedding_for_hash(&input_hash) else {
+            missing_embedding_count += 1;
+            observations.push(EmbeddingObservation {
+                missing: true,
+                ..EmbeddingObservation::default()
+            });
+            continue;
+        };
+        available_embedding_count += 1;
+
+        let fingerprint = hash_bytes(&embedding_bytes).to_string();
+        let decoded = match decode_embedding_values(&embedding_bytes, embedding_spec) {
+            Some(values) => values,
+            None => {
+                undecodable_embedding_count += 1;
+                observations.push(EmbeddingObservation {
+                    fingerprint: Some(fingerprint),
+                    undecodable: true,
+                    ..EmbeddingObservation::default()
+                });
+                continue;
+            }
+        };
+
+        let non_finite = decoded.iter().any(|value| !value.is_finite());
+        if non_finite {
+            non_finite_embedding_count += 1;
+            observations.push(EmbeddingObservation {
+                fingerprint: Some(fingerprint),
+                non_finite: true,
+                ..EmbeddingObservation::default()
+            });
+            continue;
+        }
+
+        let l2_norm = decoded
+            .iter()
+            .map(|value| {
+                let widened = f64::from(*value);
+                widened * widened
+            })
+            .sum::<f64>()
+            .sqrt();
+        let zero_vector = l2_norm <= f64::EPSILON;
+        if zero_vector {
+            zero_vector_count += 1;
+        }
+
+        norm_sum += l2_norm;
+        min_l2_norm = Some(min_l2_norm.map_or(l2_norm, |current| current.min(l2_norm)));
+        max_l2_norm = Some(max_l2_norm.map_or(l2_norm, |current| current.max(l2_norm)));
+        *fingerprint_counts.entry(fingerprint.clone()).or_insert(0) += 1;
+
+        if let (Some(sums), Some(square_sums)) =
+            (component_sums.as_mut(), component_square_sums.as_mut())
+            && decoded.len() == sums.len()
+        {
+            for ((sum, square_sum), value) in sums
+                .iter_mut()
+                .zip(square_sums.iter_mut())
+                .zip(decoded.iter())
+            {
+                let widened = f64::from(*value);
+                *sum += widened;
+                *square_sum += widened * widened;
+            }
+        }
+        finite_embedding_count += 1;
+        observations.push(EmbeddingObservation {
+            fingerprint: Some(fingerprint),
+            l2_norm: Some(l2_norm),
+            zero_vector,
+            ..EmbeddingObservation::default()
+        });
+    }
+
+    let repeated_embedding_count = fingerprint_counts
+        .values()
+        .map(|count| count.saturating_sub(1))
+        .sum();
+    let unique_embedding_count = fingerprint_counts.len();
+    let mean_l2_norm =
+        (finite_embedding_count > 0).then(|| norm_sum / finite_embedding_count as f64);
+
+    let (non_zero_variance_dimension_count, max_component_variance) =
+        if let (Some(sums), Some(square_sums)) =
+            (component_sums.as_ref(), component_square_sums.as_ref())
+        {
+            if finite_embedding_count == 0 {
+                (None, None)
+            } else {
+                let mut non_zero_count = 0usize;
+                let mut max_variance = 0.0f64;
+                for (sum, square_sum) in sums.iter().zip(square_sums.iter()) {
+                    let mean = *sum / finite_embedding_count as f64;
+                    let variance = (*square_sum / finite_embedding_count as f64) - (mean * mean);
+                    let variance = variance.max(0.0);
+                    if variance > VARIANCE_EPSILON {
+                        non_zero_count += 1;
+                    }
+                    max_variance = max_variance.max(variance);
+                }
+                (Some(non_zero_count), Some(max_variance))
+            }
+        } else {
+            (None, None)
+        };
+    let collapsed_variance_population =
+        non_zero_variance_dimension_count.is_some_and(|count| count <= 1);
+
+    let mut suspicious_input_sample = Vec::new();
+    for (input, observation) in inputs.iter().zip(observations.iter()) {
+        let mut reasons = Vec::new();
+        if observation.missing {
+            reasons.push("missing-embedding".to_string());
+        }
+        if observation.undecodable {
+            reasons.push("undecodable-embedding".to_string());
+        }
+        if observation.non_finite {
+            reasons.push("non-finite-embedding".to_string());
+        }
+        if observation.zero_vector {
+            reasons.push("zero-vector".to_string());
+        }
+        if observation
+            .fingerprint
+            .as_ref()
+            .and_then(|fingerprint| fingerprint_counts.get(fingerprint))
+            .is_some_and(|count| *count > 1)
+        {
+            reasons.push("repeated-embedding".to_string());
+        }
+        if reasons.is_empty()
+            && collapsed_variance_population
+            && observation.fingerprint.is_some()
+            && observation.l2_norm.is_some()
+        {
+            reasons.push("collapsed-variance-population".to_string());
+        }
+        if reasons.is_empty() {
+            continue;
+        }
+        suspicious_input_sample.push(SuspiciousClusteringFailureInput {
+            input: input.clone(),
+            reasons,
+            embedding_fingerprint: observation.fingerprint.clone(),
+            l2_norm: observation.l2_norm,
+        });
+        if suspicious_input_sample.len() >= SUSPICIOUS_INPUT_SAMPLE_LIMIT {
+            break;
+        }
+    }
+
+    EmbeddingHealthDiagnostics {
+        available_embedding_count,
+        missing_embedding_count,
+        undecodable_embedding_count,
+        non_finite_embedding_count,
+        zero_vector_count,
+        repeated_embedding_count,
+        unique_embedding_count,
+        min_l2_norm,
+        max_l2_norm,
+        mean_l2_norm,
+        non_zero_variance_dimension_count,
+        max_component_variance,
+        suspicious_input_sample,
+    }
+}
+
+fn failing_subset_phase_diagnostics(
+    phase: &StreamingIndexingPhase,
+) -> FailingSubsetPhaseDiagnostics {
+    match phase {
+        StreamingIndexingPhase::PlanningPass { pass_number } => {
+            FailingSubsetPhaseDiagnostics::PlanningPass {
+                pass_number: *pass_number,
+            }
+        }
+        StreamingIndexingPhase::HierarchyPlanning { stage } => {
+            FailingSubsetPhaseDiagnostics::HierarchyPlanning {
+                stage: format_planning_stage(*stage).to_string(),
+            }
+        }
+        StreamingIndexingPhase::FinalMaterializationReplay => {
+            FailingSubsetPhaseDiagnostics::FinalMaterializationReplay
+        }
+        StreamingIndexingPhase::BottomUpAssembly { layer_index } => {
+            FailingSubsetPhaseDiagnostics::BottomUpAssembly {
+                layer_index: *layer_index,
+            }
+        }
+    }
+}
+
+fn build_failing_subset_diagnostics(
+    status: &StreamingIndexingStatus,
+    top_level_input_count: usize,
+    embedding_health: &EmbeddingHealthDiagnostics,
+) -> FailingSubsetDiagnostics {
+    let exact_top_level_match = status.item_count == top_level_input_count;
+    let (provenance, basis) = if exact_top_level_match {
+        (
+            FailingSubsetProvenance::Exact,
+            "the upstream failure surface indicates the failing subset exactly matches the top-level clustering attempt".to_string(),
+        )
+    } else {
+        (
+            FailingSubsetProvenance::NarrowestProvable,
+            format!(
+                "the upstream failure surface reported {} active item(s) for the failing step but did not expose repository-visible identities for a narrower subset, so the top-level clustering attempt remains the narrowest provable repository-visible subset",
+                status.item_count
+            ),
+        )
+    };
+    FailingSubsetDiagnostics {
+        phase: failing_subset_phase_diagnostics(&status.phase),
+        provenance,
+        basis,
+        upstream_active_item_count: status.item_count,
+        upstream_completed_unit_count: status.completed_unit_count,
+        upstream_phase_total_unit_count: status.phase_total_unit_count,
+        repository_visible_subset: RepositoryVisibleSubsetDiagnostics::SameAsTopLevelAttempt {
+            input_count: top_level_input_count,
+        },
+        embedding_health: embedding_health.clone(),
+    }
+}
+
 fn build_clustering_failure_diagnostics(
+    resolver: &LocalFilesystemContentResolver,
+    embedding_source: &dyn ClusteringFailureEmbeddingSource,
+    failing_status: Option<&StreamingIndexingStatus>,
     config: &StreamingStageConfig,
     replay_batches: &[ReplayBatch],
     embedding_spec: &EmbeddingSpec,
@@ -593,6 +952,15 @@ fn build_clustering_failure_diagnostics(
         config.block_size_target,
         embedding_spec,
     )?;
+    let embedding_health = build_embedding_health_diagnostics(
+        resolver,
+        embedding_source,
+        replay_batches,
+        &inputs,
+        embedding_spec,
+    );
+    let failing_subset = failing_status
+        .map(|status| build_failing_subset_diagnostics(status, input_count, &embedding_health));
     Some(ClusteringFailureDiagnostics {
         stage: config.stage,
         embedding_spec: ClusteringFailureEmbeddingSpec {
@@ -601,6 +969,8 @@ fn build_clustering_failure_diagnostics(
         },
         block_size_target: config.block_size_target,
         clustering,
+        embedding_health,
+        failing_subset,
         input_count,
         inputs,
     })
@@ -1360,12 +1730,18 @@ async fn run_streaming_stage<EP>(
     progress: &ProgressReporter,
 ) -> Result<BatchSummary, RuntimeError>
 where
-    EP: EmbeddingProvider + Clone,
+    EP: EmbeddingProvider + ClusteringFailureEmbeddingSource + Clone,
 {
-    let observer = Some(make_status_observer(Arc::clone(progress)));
+    let latest_failed_status = Arc::new(Mutex::new(None));
+    let observer = Some(make_status_observer(
+        Arc::clone(progress),
+        Arc::clone(&latest_failed_status),
+    ));
     let total_batches = replay_batches.len();
     let total_items: usize = replay_batches.iter().map(|batch| batch.items.len()).sum();
     let clustering_failure_diagnostics = OnceLock::new();
+    let diagnostics_resolver = resolver.clone();
+    let diagnostics_embedding_provider = embedding_provider.clone();
 
     let mut indexer = StreamingIndexingRun::with_canonical_policy(
         resolver,
@@ -1433,7 +1809,14 @@ where
             error,
             clustering_failure_diagnostics
                 .get_or_init(|| {
-                    build_clustering_failure_diagnostics(&config, &replay_batches, embedding_spec)
+                    build_clustering_failure_diagnostics(
+                        &diagnostics_resolver,
+                        &diagnostics_embedding_provider,
+                        lock_unpoisoned(&latest_failed_status).as_ref(),
+                        &config,
+                        &replay_batches,
+                        embedding_spec,
+                    )
                 })
                 .as_ref(),
             progress,
@@ -1451,7 +1834,14 @@ where
             error,
             clustering_failure_diagnostics
                 .get_or_init(|| {
-                    build_clustering_failure_diagnostics(&config, &replay_batches, embedding_spec)
+                    build_clustering_failure_diagnostics(
+                        &diagnostics_resolver,
+                        &diagnostics_embedding_provider,
+                        lock_unpoisoned(&latest_failed_status).as_ref(),
+                        &config,
+                        &replay_batches,
+                        embedding_spec,
+                    )
                 })
                 .as_ref(),
             progress,
@@ -1473,6 +1863,9 @@ where
                 clustering_failure_diagnostics
                     .get_or_init(|| {
                         build_clustering_failure_diagnostics(
+                            &diagnostics_resolver,
+                            &diagnostics_embedding_provider,
+                            lock_unpoisoned(&latest_failed_status).as_ref(),
                             &config,
                             &replay_batches,
                             embedding_spec,
@@ -1651,10 +2044,40 @@ fn replay_item_from_validated_block(
     )))
 }
 
-fn make_status_observer(progress: ProgressReporter) -> StreamingIndexingStatusObserver {
+fn make_status_observer(
+    progress: ProgressReporter,
+    latest_failed_status: Arc<Mutex<Option<StreamingIndexingStatus>>>,
+) -> StreamingIndexingStatusObserver {
     Arc::new(move |status| {
+        if status.state == StreamingIndexingStatusState::Failed {
+            let mut captured = lock_unpoisoned(&latest_failed_status);
+            match captured.as_ref() {
+                Some(existing) if !prefer_failed_status(&status, existing) => {}
+                _ => *captured = Some(status.clone()),
+            }
+        }
         report_progress(&progress, format_indexing_status(status));
     })
+}
+
+fn failed_status_specificity(status: &StreamingIndexingStatus) -> usize {
+    match status.phase {
+        StreamingIndexingPhase::PlanningPass { .. } => 0,
+        StreamingIndexingPhase::FinalMaterializationReplay => 1,
+        StreamingIndexingPhase::HierarchyPlanning { .. } => 2,
+        StreamingIndexingPhase::BottomUpAssembly { .. } => 2,
+    }
+}
+
+fn prefer_failed_status(
+    candidate: &StreamingIndexingStatus,
+    existing: &StreamingIndexingStatus,
+) -> bool {
+    let candidate_specificity = failed_status_specificity(candidate);
+    let existing_specificity = failed_status_specificity(existing);
+    candidate_specificity > existing_specificity
+        || (candidate_specificity == existing_specificity
+            && candidate.item_count <= existing.item_count)
 }
 
 fn format_planning_stage(stage: PlanningStage) -> &'static str {
@@ -1881,8 +2304,48 @@ fn hash_embedding_content(media_type: &str, body: &[u8]) -> BlockHash {
     BlockHash::from_bytes(digest.finalize().into())
 }
 
+fn hash_bytes(bytes: &[u8]) -> BlockHash {
+    use sha2::{Digest, Sha256};
+
+    BlockHash::from_bytes(Sha256::digest(bytes).into())
+}
+
 fn hash_embedding_input(input: &EmbeddingInput) -> BlockHash {
     hash_embedding_content(&input.media_type, &input.body)
+}
+
+fn decode_embedding_values(bytes: &[u8], embedding_spec: &EmbeddingSpec) -> Option<Vec<f32>> {
+    let dimension_count = usize::try_from(embedding_spec.dims).ok()?;
+    match embedding_spec.encoding.as_str() {
+        "f32le" => {
+            if bytes.len() != dimension_count.checked_mul(4)? {
+                return None;
+            }
+            Some(
+                bytes
+                    .chunks_exact(4)
+                    .map(|chunk| {
+                        f32::from_le_bytes(chunk.try_into().expect("embedding chunk size is fixed"))
+                    })
+                    .collect(),
+            )
+        }
+        "f16le" => {
+            if bytes.len() != dimension_count.checked_mul(2)? {
+                return None;
+            }
+            Some(
+                bytes
+                    .chunks_exact(2)
+                    .map(|chunk| {
+                        f16::from_le_bytes(chunk.try_into().expect("embedding chunk size is fixed"))
+                            .to_f32()
+                    })
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
 }
 
 fn placeholder_root_id() -> String {
@@ -2451,6 +2914,38 @@ mod tests {
         );
         assert_eq!(diagnostics.input_count, 3);
         assert_eq!(diagnostics.inputs.len(), 3);
+        assert_eq!(diagnostics.embedding_health.available_embedding_count, 3);
+        assert_eq!(diagnostics.embedding_health.non_finite_embedding_count, 3);
+        let failing_subset = diagnostics
+            .failing_subset
+            .as_ref()
+            .expect("expected failing subset diagnostics");
+        assert_eq!(
+            failing_subset.phase,
+            FailingSubsetPhaseDiagnostics::HierarchyPlanning {
+                stage: "single-stage planning".into(),
+            }
+        );
+        assert_eq!(failing_subset.provenance, FailingSubsetProvenance::Exact);
+        assert_eq!(failing_subset.upstream_active_item_count, 3);
+        assert_eq!(
+            failing_subset.repository_visible_subset,
+            RepositoryVisibleSubsetDiagnostics::SameAsTopLevelAttempt { input_count: 3 }
+        );
+        assert_eq!(
+            diagnostics.embedding_health.suspicious_input_sample.len(),
+            3
+        );
+        assert!(
+            diagnostics
+                .embedding_health
+                .suspicious_input_sample
+                .iter()
+                .all(|sample| sample
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == "non-finite-embedding"))
+        );
         assert!(diagnostics.inputs.iter().any(|input| matches!(
             input,
             ClusteringFailureInput::Document { source_path, .. } if source_path.ends_with("alpha.txt")
@@ -2521,6 +3016,10 @@ mod tests {
             .join("summary.clustering-failure-diagnostics.json");
         let written = fs::read_to_string(&diagnostics_path).unwrap();
         assert!(written.contains("\"algorithm\": \"directional-pca\""));
+        assert!(written.contains("\"embedding_health\""));
+        assert!(written.contains("\"failing_subset\""));
+        assert!(written.contains("\"provenance\": \"exact\""));
+        assert!(written.contains("\"non-finite-embedding\""));
         assert!(written.contains("alpha.txt"));
     }
 
@@ -3076,6 +3575,126 @@ mod tests {
     }
 
     #[test]
+    fn embedding_health_diagnostics_reports_degenerate_signals_and_samples() {
+        let store = ConfiguredBlockStore::from_environment(
+            Path::new("."),
+            &local_test_environment(String::new()),
+        )
+        .unwrap();
+        let resolver = LocalFilesystemContentResolver::new(store);
+        let embedding_spec = EmbeddingSpec {
+            dims: 2,
+            encoding: "f32le".into(),
+        };
+        let replay_batches = vec![ReplayBatch {
+            items: vec![
+                IndexItem {
+                    metadata: vec![],
+                    content_ref: ContentRef::Inline {
+                        media_type: "text/plain".into(),
+                        body: b"alpha".to_vec(),
+                    },
+                },
+                IndexItem {
+                    metadata: vec![],
+                    content_ref: ContentRef::Inline {
+                        media_type: "text/plain".into(),
+                        body: b"beta".to_vec(),
+                    },
+                },
+                IndexItem {
+                    metadata: vec![],
+                    content_ref: ContentRef::Inline {
+                        media_type: "text/plain".into(),
+                        body: b"gamma".to_vec(),
+                    },
+                },
+                IndexItem {
+                    metadata: vec![],
+                    content_ref: ContentRef::Inline {
+                        media_type: "text/plain".into(),
+                        body: b"delta".to_vec(),
+                    },
+                },
+            ],
+            completion_message: None,
+        }];
+        let inputs = replay_batches[0]
+            .items
+            .iter()
+            .map(clustering_failure_input)
+            .collect::<Vec<_>>();
+        let embeddings_by_input_hash = HashMap::from([
+            (
+                hash_embedding_content("text/plain", b"alpha").into_bytes(),
+                [0.0f32, 0.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            ),
+            (
+                hash_embedding_content("text/plain", b"beta").into_bytes(),
+                [1.0f32, 1.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            ),
+            (
+                hash_embedding_content("text/plain", b"gamma").into_bytes(),
+                [1.0f32, 1.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            ),
+            (
+                hash_embedding_content("text/plain", b"delta").into_bytes(),
+                [f32::NAN, 0.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            ),
+        ]);
+        let source = StoredLeafEmbeddingProvider {
+            embeddings_by_input_hash: Arc::new(embeddings_by_input_hash),
+        };
+
+        let diagnostics = build_embedding_health_diagnostics(
+            &resolver,
+            &source,
+            &replay_batches,
+            &inputs,
+            &embedding_spec,
+        );
+
+        assert_eq!(diagnostics.available_embedding_count, 4);
+        assert_eq!(diagnostics.missing_embedding_count, 0);
+        assert_eq!(diagnostics.undecodable_embedding_count, 0);
+        assert_eq!(diagnostics.non_finite_embedding_count, 1);
+        assert_eq!(diagnostics.zero_vector_count, 1);
+        assert_eq!(diagnostics.repeated_embedding_count, 1);
+        assert_eq!(diagnostics.unique_embedding_count, 2);
+        assert_eq!(diagnostics.suspicious_input_sample.len(), 4);
+        assert!(
+            diagnostics
+                .suspicious_input_sample
+                .iter()
+                .any(|sample| sample.reasons.iter().any(|reason| reason == "zero-vector"))
+        );
+        assert!(diagnostics.suspicious_input_sample.iter().any(|sample| {
+            sample
+                .reasons
+                .iter()
+                .any(|reason| reason == "repeated-embedding")
+        }));
+        assert!(diagnostics.suspicious_input_sample.iter().any(|sample| {
+            sample
+                .reasons
+                .iter()
+                .any(|reason| reason == "non-finite-embedding")
+        }));
+    }
+
+    #[test]
     fn write_clustering_failure_diagnostics_file_creates_parent_directories() {
         let temp = tempdir().unwrap();
         let output_path = temp
@@ -3092,6 +3711,7 @@ mod tests {
         let written = fs::read_to_string(&output_path).unwrap();
         assert!(written.contains("\"stage\": \"full-pipeline\""));
         assert!(written.contains("\"algorithm\": \"directional-pca\""));
+        assert!(written.contains("\"embedding_health\""));
         assert!(written.contains("\"source_path\": \"alpha.txt\""));
     }
 
@@ -3143,6 +3763,31 @@ mod tests {
     }
 
     fn sample_clustering_failure_diagnostics() -> ClusteringFailureDiagnostics {
+        let embedding_health = EmbeddingHealthDiagnostics {
+            available_embedding_count: 1,
+            missing_embedding_count: 0,
+            undecodable_embedding_count: 0,
+            non_finite_embedding_count: 0,
+            zero_vector_count: 1,
+            repeated_embedding_count: 0,
+            unique_embedding_count: 1,
+            min_l2_norm: Some(0.0),
+            max_l2_norm: Some(0.0),
+            mean_l2_norm: Some(0.0),
+            non_zero_variance_dimension_count: Some(0),
+            max_component_variance: Some(0.0),
+            suspicious_input_sample: vec![SuspiciousClusteringFailureInput {
+                input: ClusteringFailureInput::Document {
+                    logical_id: "document:alpha.txt".into(),
+                    source_path: "alpha.txt".into(),
+                },
+                reasons: vec!["zero-vector".into(), "collapsed-variance-population".into()],
+                embedding_fingerprint: Some(
+                    "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc".into(),
+                ),
+                l2_norm: Some(0.0),
+            }],
+        };
         ClusteringFailureDiagnostics {
             stage: ExecutionStage::FullPipeline,
             embedding_spec: ClusteringFailureEmbeddingSpec {
@@ -3160,12 +3805,85 @@ mod tests {
                 min_effective_rank: 1,
                 min_cumulative_variance: 0.0,
             },
+            embedding_health: embedding_health.clone(),
+            failing_subset: Some(FailingSubsetDiagnostics {
+                phase: FailingSubsetPhaseDiagnostics::HierarchyPlanning {
+                    stage: "single-stage planning".into(),
+                },
+                provenance: FailingSubsetProvenance::NarrowestProvable,
+                basis: "the upstream failure surface reported 1 active item(s) for the failing step but did not expose repository-visible identities for a narrower subset, so the top-level clustering attempt remains the narrowest provable repository-visible subset".into(),
+                upstream_active_item_count: 1,
+                upstream_completed_unit_count: 0,
+                upstream_phase_total_unit_count: Some(1),
+                repository_visible_subset: RepositoryVisibleSubsetDiagnostics::SameAsTopLevelAttempt {
+                    input_count: 1,
+                },
+                embedding_health,
+            }),
             input_count: 1,
             inputs: vec![ClusteringFailureInput::Document {
                 logical_id: "document:alpha.txt".into(),
                 source_path: "alpha.txt".into(),
             }],
         }
+    }
+
+    #[test]
+    fn failing_subset_diagnostics_marks_exact_top_level_match() {
+        let diagnostics = build_failing_subset_diagnostics(
+            &StreamingIndexingStatus {
+                phase: StreamingIndexingPhase::HierarchyPlanning {
+                    stage: PlanningStage::Single,
+                },
+                state: StreamingIndexingStatusState::Failed,
+                item_count: 3,
+                phase_total_unit_count: Some(3),
+                completed_unit_count: 0,
+                remaining_unit_count: Some(3),
+                elapsed: Duration::from_secs(1),
+                error: Some("boom".into()),
+            },
+            3,
+            &sample_clustering_failure_diagnostics().embedding_health,
+        );
+
+        assert_eq!(diagnostics.provenance, FailingSubsetProvenance::Exact);
+        assert_eq!(
+            diagnostics.repository_visible_subset,
+            RepositoryVisibleSubsetDiagnostics::SameAsTopLevelAttempt { input_count: 3 }
+        );
+        assert!(diagnostics.basis.contains("exactly matches the top-level"));
+    }
+
+    #[test]
+    fn failing_subset_diagnostics_falls_back_to_narrowest_provable_top_level_subset() {
+        let diagnostics = build_failing_subset_diagnostics(
+            &StreamingIndexingStatus {
+                phase: StreamingIndexingPhase::HierarchyPlanning {
+                    stage: PlanningStage::Single,
+                },
+                state: StreamingIndexingStatusState::Failed,
+                item_count: 1,
+                phase_total_unit_count: Some(1),
+                completed_unit_count: 0,
+                remaining_unit_count: Some(1),
+                elapsed: Duration::from_secs(1),
+                error: Some("boom".into()),
+            },
+            3,
+            &sample_clustering_failure_diagnostics().embedding_health,
+        );
+
+        assert_eq!(
+            diagnostics.provenance,
+            FailingSubsetProvenance::NarrowestProvable
+        );
+        assert_eq!(diagnostics.upstream_active_item_count, 1);
+        assert!(
+            diagnostics
+                .basis
+                .contains("did not expose repository-visible identities")
+        );
     }
 
     #[test]

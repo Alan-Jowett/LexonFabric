@@ -473,11 +473,11 @@ shape across multiple telemetry contexts.
 ### DSG-LFI-002C `Clustering failure diagnostics`
 
 LexonArchiveBuilder realizes diagnosable clustering failures through one
-repository-owned clustering-attempt snapshot that is assembled at the first
-runtime point where both the clustering candidate set and the effective
-delegated clustering configuration are simultaneously known.
+repository-owned top-level clustering-attempt snapshot plus one narrower
+failure-subset snapshot when the upstream failure surface exposes a more precise
+failing partition or subproblem.
 
-That snapshot records:
+The top-level clustering-attempt snapshot records:
 
 - the selected execution stage
 - the active embedding specification
@@ -488,17 +488,45 @@ That snapshot records:
 - the exact repository-visible clustering input set for the attempt using
   stable identifiers such as child block identifiers, replay-item identities,
   or equivalent repository-owned logical node identifiers
+- compact embedding-health evidence for the failed attempt, including summary
+  statistics and counts that can distinguish zero vectors, repeated vectors,
+  non-finite values, or collapsed variance without requiring a full raw-vector
+  dump
+- a small repository-visible suspicious-input sample tied to that
+  embedding-health evidence so operators can inspect representative bad cases
 
-On a clustering failure, the runtime renders this same snapshot onto the normal
-batch log stream and serializes it to one request-adjacent diagnostic artifact.
-The artifact location follows one repository-owned output policy: use the
-`--summary-out` directory when present, otherwise the `--request` file
+When the upstream failure surface exposes a narrower failing partition or
+subproblem, or when LexonArchiveBuilder can otherwise prove a narrower
+repository-visible subset was active at the failing step, the same failure
+record also carries a failing-subset snapshot that records:
+
+- the exact failing partition or otherwise the narrowest provable
+  repository-visible subset active at the failing step
+- the embedding-health evidence and suspicious-input sample for that narrower
+  subset
+- enough linkage to correlate the narrower failing subset back to the enclosing
+  top-level clustering attempt
+
+If the upstream failure surface does not expose an exact failing partition,
+LexonArchiveBuilder still records the narrowest repository-visible subset it can
+prove was active at the failing step rather than dropping back to top-level-only
+diagnostics.
+
+On a clustering failure, the runtime renders the same failure record onto the
+normal batch log stream and serializes it to one request-adjacent diagnostic
+artifact. The artifact location follows one repository-owned output policy: use
+the `--summary-out` directory when present, otherwise the `--request` file
 directory.
 
 This design keeps failure diagnosability inside the short-lived batch runtime.
 It does not introduce a new control plane, metrics surface, or MCP-visible
 diagnostic API, and it does not require the same verbose clustering-input
 inventory on successful runs.
+
+The design intentionally keeps full raw embedding vectors out of the normal
+failure artifact. For this increment, compact embedding-health evidence plus a
+small suspicious-input sample is the repository-owned boundary for diagnosing
+degenerate-embedding failures without making the artifact unmanageably large.
 
 If writing the request-adjacent artifact fails, the runtime still emits the
 clustering-attempt snapshot on the normal log stream together with the original

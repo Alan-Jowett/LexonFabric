@@ -83,6 +83,10 @@
 - **UR-73 [KNOWN]:** When clustering fails, operators need to know what nodes were being clustered and what parameters were passed so the failure is diagnosable without reproducing the run under a debugger.
 - **UR-74 [KNOWN]:** The required clustering-failure diagnostics must be emitted on the runtime log and in a request-adjacent diagnostic artifact rather than on a new control-plane or MCP surface.
 - **UR-75 [KNOWN]:** Detailed clustering diagnostics are required only for failure cases in this increment; successful clustering runs do not need the same verbose input inventory.
+- **UR-76 [KNOWN]:** The current clustering-failure artifact can identify the failing input set and effective delegated configuration, but it still cannot explain *why* failures such as directional-PCA rank collapse occurred because it does not include any embedding-level health diagnostics.
+- **UR-77 [KNOWN]:** For clustering failures caused by degenerate or suspicious embedding sets, operators need compact embedding-health diagnostics plus a small suspicious-input sample rather than a full dump of every raw embedding vector.
+- **UR-78 [KNOWN]:** The current top-level embedding-health diagnostics can show that the full clustering attempt looked broadly healthy while still failing, which is not enough when the real collapse happened inside a smaller upstream partition or subproblem.
+- **UR-79 [KNOWN]:** When the upstream failure surface permits it, operators need diagnostics for the exact failing partition or subproblem; when it does not, LexonArchiveBuilder should still report the narrowest repository-visible subset it can prove was active at the failing step.
 
 ## Change Manifest
 
@@ -132,6 +136,8 @@
 | CM-INDEXER-042 | Revise | Tighten progress-observability requirements so LexonArchiveBuilder projects richer upstream live telemetry and heartbeat events onto the existing runtime progress surface without creating a second telemetry interface | UR-68, UR-69, UR-71 |
 | CM-INDEXER-043 | Add | Preserve operator-understandable progress semantics across the telemetry upgrade by distinguishing repository-owned totals, upstream stage-local progress, and materialization-layer counts instead of surfacing ambiguous raw counts | UR-68, UR-69, UR-70 |
 | CM-INDEXER-044 | Add | Require failure-only clustering diagnostics that identify the exact failing input set and effective delegated clustering configuration on the runtime log and in a request-adjacent artifact | UR-39, UR-50, UR-72, UR-73, UR-74, UR-75 |
+| CM-INDEXER-045 | Revise | Extend clustering-failure diagnostics with compact embedding-health evidence and a small suspicious-input sample so degenerate-embedding failures become diagnosable without dumping all raw vectors | UR-72, UR-73, UR-74, UR-75, UR-76, UR-77 |
+| CM-INDEXER-046 | Revise | Extend clustering-failure diagnostics to identify the exact failing partition or otherwise the narrowest provable failing subset, so nested upstream subproblem failures become diagnosable instead of only the top-level attempt | UR-72, UR-73, UR-74, UR-75, UR-78, UR-79 |
 
 ## Before / After
 
@@ -354,6 +360,16 @@
 
 - **Before [KNOWN]:** When delegated clustering failed, runtime-visible output could report elapsed time and the upstream error text without identifying the exact clustering input set or the effective delegated clustering configuration used for the failing attempt.
 - **After [KNOWN]:** The requirements now require failure-only clustering diagnostics that identify the exact repository-visible input set and effective delegated clustering configuration on the runtime log and in a request-adjacent diagnostic artifact.
+
+### BA-INDEXER-045
+
+- **Before [KNOWN]:** The current clustering-failure diagnostics can identify which repository-visible inputs were clustered and which effective delegated configuration was used, but they still do not expose enough embedding-health evidence to explain why a rank-collapse or similar degenerate-embedding failure occurred.
+- **After [KNOWN]:** The requirements now require clustering-failure diagnostics to add compact embedding-health evidence and a small suspicious-input sample so embedding-degeneracy failures become diagnosable without logging or persisting every raw embedding vector.
+
+### BA-INDEXER-046
+
+- **Before [KNOWN]:** The current clustering-failure diagnostics describe the top-level clustering attempt, but they still cannot identify the narrower upstream partition or subproblem that actually triggered a nested rank-collapse failure.
+- **After [KNOWN]:** The requirements now require clustering-failure diagnostics to identify the exact failing partition when the upstream failure surface exposes it, or otherwise the narrowest repository-visible subset LexonArchiveBuilder can prove was active at the failing step.
 
 ## Requirements
 
@@ -754,6 +770,20 @@ reconstructable to an operator.
   `cluster_count`, the effective algorithm-specific parameter values, the active
   embedding specification, the block-size target, and the selected execution
   stage.
+- **Embedding-health visibility [KNOWN]:** Failure diagnostics must include compact
+  embedding-health evidence sufficient to explain embedding-degeneracy failures,
+  including summary statistics and counts that let an operator distinguish
+  cases such as zero vectors, repeated vectors, non-finite values, or collapsed
+  variance without recomputing the run under a debugger.
+- **Failing-subset visibility [KNOWN]:** Failure diagnostics must identify the
+  exact failing partition or subproblem when the upstream failure surface
+  exposes it, and otherwise must identify the narrowest repository-visible
+  subset LexonArchiveBuilder can prove was active at the failing step rather
+  than reporting only the top-level clustering attempt.
+- **Suspicious-sample visibility [KNOWN]:** Failure diagnostics must include a
+  small repository-visible sample of suspicious clustering inputs tied to the
+  embedding-health evidence so operators can inspect representative bad cases
+  without dumping every embedding vector in the failed input set.
 - **Dual-surface requirement [KNOWN]:** The required diagnostics must be emitted
   on the normal runtime log stream and written to a request-adjacent diagnostic
   artifact so failure analysis does not depend on retaining transient console
@@ -761,6 +791,14 @@ reconstructable to an operator.
 - **Failure-only scope [KNOWN]:** This requirement does not obligate
   LexonArchiveBuilder to emit the same detailed clustering-input inventory for
   successful clustering runs in this increment.
+- **Top-level preservation [KNOWN]:** This requirement extends the current
+  top-level clustering-attempt diagnostics rather than replacing them, so
+  operators can correlate the full attempt with the narrower failing subset in
+  the same failure record.
+- **Raw-vector boundary [KNOWN]:** This requirement does not obligate
+  LexonArchiveBuilder to log or persist the full raw embedding vector for every
+  failed clustering input; compact summary evidence plus a small suspicious
+  sample is sufficient in this increment.
 - **Environment parity [INFERRED]:** The same diagnostic information must remain
   available for local/testing and preserved production-shaped runs rather than
   existing only in one environment profile.
@@ -779,7 +817,7 @@ reconstructable to an operator.
   SHALL be written in the `--summary-out` directory when that output path is
   present and SHALL otherwise be written in the same directory as the
   `--request` file.
-- **Traceability:** UR-39, UR-41, UR-50, UR-72, UR-73, UR-74, UR-75
+- **Traceability:** UR-39, UR-41, UR-50, UR-72, UR-73, UR-74, UR-75, UR-76, UR-77, UR-78, UR-79
 
 ### Boundary and Invariant Requirements
 

@@ -460,9 +460,17 @@ repository-visible clustering input set for the failed attempt and the
 effective delegated clustering configuration used for that attempt, and the
 runtime writes the same failure diagnostics to a request-adjacent artifact in
 the `--summary-out` directory when present or otherwise in the `--request`
-directory. If artifact persistence fails, the log output still contains enough
-diagnostic detail to identify the failed input set and effective delegated
-configuration without relying on the artifact.
+directory. Those failure diagnostics also include compact embedding-health
+evidence plus a small suspicious-input sample sufficient to distinguish
+degenerate-embedding cases such as zero vectors, repeated vectors, non-finite
+values, or collapsed variance without persisting every raw embedding vector.
+When the upstream failure surface exposes a narrower failing partition or
+subproblem, the diagnostics also identify that exact failing subset; otherwise
+they identify the narrowest repository-visible subset LexonArchiveBuilder can
+prove was active at the failing step. If artifact persistence fails, the log
+output still contains enough diagnostic detail to identify the failed input
+set, effective delegated configuration, failing subset, and embedding-health
+failure signature without relying on the artifact.
 
 **Traces to:** RQ-INDEXER-008C, DSG-LFI-002C
 

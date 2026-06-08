@@ -3590,24 +3590,27 @@ mod tests {
 
     #[test]
     fn clustering_failure_diagnostics_path_prefers_summary_output_directory() {
+        let request_path = Path::new("data").join("request.json");
+        let summary_path = Path::new("output").join("summary.json");
         let path = clustering_failure_diagnostics_path(
-            Path::new("C:\\data\\request.json"),
-            Some(Path::new("C:\\output\\summary.json")),
+            request_path.as_path(),
+            Some(summary_path.as_path()),
         );
 
         assert_eq!(
             path,
-            Path::new("C:\\output\\summary.clustering-failure-diagnostics.json")
+            Path::new("output").join("summary.clustering-failure-diagnostics.json")
         );
     }
 
     #[test]
     fn clustering_failure_diagnostics_path_falls_back_to_request_directory() {
-        let path = clustering_failure_diagnostics_path(Path::new("C:\\data\\request.json"), None);
+        let request_path = Path::new("data").join("request.json");
+        let path = clustering_failure_diagnostics_path(request_path.as_path(), None);
 
         assert_eq!(
             path,
-            Path::new("C:\\data\\request.clustering-failure-diagnostics.json")
+            Path::new("data").join("request.clustering-failure-diagnostics.json")
         );
     }
 
@@ -3653,8 +3656,9 @@ mod tests {
 
     #[test]
     fn embedding_health_diagnostics_reports_degenerate_signals_and_samples() {
+        let temp = tempdir().unwrap();
         let store = ConfiguredBlockStore::from_environment(
-            Path::new("."),
+            temp.path(),
             &local_test_environment(String::new()),
         )
         .unwrap();

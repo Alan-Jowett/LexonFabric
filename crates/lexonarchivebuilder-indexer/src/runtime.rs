@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use lexongraph_block::{
@@ -511,10 +511,13 @@ fn clustering_failure_input(item: &IndexItem<ContentRef>) -> ClusteringFailureIn
                 source_path,
             }
         }
-        ContentRef::Inline { media_type, .. } => ClusteringFailureInput::Inline {
-            logical_id: format!("inline:{media_type}"),
-            media_type: media_type.clone(),
-        },
+        ContentRef::Inline { media_type, body } => {
+            let input_hash = hash_embedding_content(media_type, body);
+            ClusteringFailureInput::Inline {
+                logical_id: format!("inline:{media_type}:{input_hash}"),
+                media_type: media_type.clone(),
+            }
+        }
         ContentRef::EmailChunk {
             email_artifact_ref,
             chunk_index,
@@ -1362,8 +1365,7 @@ where
     let observer = Some(make_status_observer(Arc::clone(progress)));
     let total_batches = replay_batches.len();
     let total_items: usize = replay_batches.iter().map(|batch| batch.items.len()).sum();
-    let clustering_failure_diagnostics =
-        build_clustering_failure_diagnostics(&config, &replay_batches, embedding_spec);
+    let clustering_failure_diagnostics = OnceLock::new();
 
     let mut indexer = StreamingIndexingRun::with_canonical_policy(
         resolver,
@@ -1427,7 +1429,15 @@ where
             .handoff_message(total_batches, total_items),
     );
     let pass_report = indexer.finish_pass().map_err(|error| {
-        clustering_failure_error(error, clustering_failure_diagnostics.as_ref(), progress)
+        clustering_failure_error(
+            error,
+            clustering_failure_diagnostics
+                .get_or_init(|| {
+                    build_clustering_failure_diagnostics(&config, &replay_batches, embedding_spec)
+                })
+                .as_ref(),
+            progress,
+        )
     })?;
     report_progress(
         progress,
@@ -1437,7 +1447,15 @@ where
         ),
     );
     indexer.mark_planning_complete().map_err(|error| {
-        clustering_failure_error(error, clustering_failure_diagnostics.as_ref(), progress)
+        clustering_failure_error(
+            error,
+            clustering_failure_diagnostics
+                .get_or_init(|| {
+                    build_clustering_failure_diagnostics(&config, &replay_batches, embedding_spec)
+                })
+                .as_ref(),
+            progress,
+        )
     })?;
     report_progress(
         progress,
@@ -1450,7 +1468,19 @@ where
         )
         .await
         .map_err(|error| {
-            clustering_failure_error(error, clustering_failure_diagnostics.as_ref(), progress)
+            clustering_failure_error(
+                error,
+                clustering_failure_diagnostics
+                    .get_or_init(|| {
+                        build_clustering_failure_diagnostics(
+                            &config,
+                            &replay_batches,
+                            embedding_spec,
+                        )
+                    })
+                    .as_ref(),
+                progress,
+            )
         })?;
 
     if result.block_ids.is_empty() {
@@ -1841,14 +1871,18 @@ fn report_progress(progress: &ProgressReporter, message: String) {
     progress.as_ref()(message);
 }
 
-fn hash_embedding_input(input: &EmbeddingInput) -> BlockHash {
+fn hash_embedding_content(media_type: &str, body: &[u8]) -> BlockHash {
     use sha2::{Digest, Sha256};
 
     let mut digest = Sha256::new();
-    digest.update(input.media_type.as_bytes());
+    digest.update(media_type.as_bytes());
     digest.update([0]);
-    digest.update(&input.body);
+    digest.update(body);
     BlockHash::from_bytes(digest.finalize().into())
+}
+
+fn hash_embedding_input(input: &EmbeddingInput) -> BlockHash {
+    hash_embedding_content(&input.media_type, &input.body)
 }
 
 fn placeholder_root_id() -> String {
@@ -2999,6 +3033,46 @@ mod tests {
             path,
             Path::new("C:\\data\\request.clustering-failure-diagnostics.json")
         );
+    }
+
+    #[test]
+    fn clustering_failure_input_uses_content_hash_for_inline_logical_id() {
+        let alpha = IndexItem {
+            metadata: vec![],
+            content_ref: ContentRef::Inline {
+                media_type: "text/plain".into(),
+                body: b"alpha".to_vec(),
+            },
+        };
+        let beta = IndexItem {
+            metadata: vec![],
+            content_ref: ContentRef::Inline {
+                media_type: "text/plain".into(),
+                body: b"beta".to_vec(),
+            },
+        };
+
+        let alpha = clustering_failure_input(&alpha);
+        let beta = clustering_failure_input(&beta);
+        match (&alpha, &beta) {
+            (
+                ClusteringFailureInput::Inline {
+                    logical_id: alpha_id,
+                    media_type: alpha_type,
+                },
+                ClusteringFailureInput::Inline {
+                    logical_id: beta_id,
+                    media_type: beta_type,
+                },
+            ) => {
+                assert_eq!(alpha_type, "text/plain");
+                assert_eq!(beta_type, "text/plain");
+                assert!(alpha_id.starts_with("inline:text/plain:"));
+                assert!(beta_id.starts_with("inline:text/plain:"));
+                assert_ne!(alpha_id, beta_id);
+            }
+            other => panic!("expected inline diagnostics, got {other:?}"),
+        }
     }
 
     #[test]

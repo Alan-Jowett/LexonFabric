@@ -311,6 +311,14 @@ fn derive_auto_sized_cluster_count(
 
     let max_per =
         max_children_per_branch(embedding_spec, block_size_target, estimated_child_count)?;
+    let max_sensible = estimated_child_count / 2;
+    if estimated_child_count > 1 && minimum_cluster_count > max_sensible {
+        return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
+            format!(
+                "cannot satisfy minimum cluster count {minimum_cluster_count} and two-children-per-branch constraint for {estimated_child_count} children with block size target {block_size_target}"
+            ),
+        ));
+    }
     if estimated_child_count <= max_per.max(1) {
         return u32::try_from(minimum_cluster_count).map_err(|_| {
             AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
@@ -322,7 +330,6 @@ fn derive_auto_sized_cluster_count(
     let needed = estimated_child_count
         .div_ceil(max_per.max(2))
         .max(minimum_cluster_count);
-    let max_sensible = estimated_child_count / 2;
     if needed > max_sensible {
         return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
             format!(
@@ -2094,6 +2101,39 @@ mod tests {
     }
 
     #[test]
+    fn omitted_dcbc_cluster_count_matches_explicit_auto_sized_count() {
+        let embedding_spec = EmbeddingSpec {
+            dims: 2,
+            encoding: "f32le".into(),
+        };
+        let block_size_target = serialized_branch_size(&embedding_spec, 3).unwrap();
+        let omitted = resolved_built_in_clustering(
+            &ConfiguredClustering::Dcbc {
+                cluster_count: None,
+                balance_constraints: None,
+                random_seed: Some(7),
+            },
+            9,
+            block_size_target,
+            &embedding_spec,
+        )
+        .unwrap();
+        let explicit = resolved_built_in_clustering(
+            &ConfiguredClustering::Dcbc {
+                cluster_count: Some(3),
+                balance_constraints: None,
+                random_seed: Some(7),
+            },
+            9,
+            block_size_target,
+            &embedding_spec,
+        )
+        .unwrap();
+
+        assert_eq!(omitted, explicit);
+    }
+
+    #[test]
     fn omitted_directional_pca_cluster_count_respects_retained_dimension_count() {
         let embedding_spec = EmbeddingSpec {
             dims: 2,
@@ -2126,6 +2166,21 @@ mod tests {
             }
             BuiltInClustering::Dcbc(_) => panic!("expected directional-pca settings"),
         }
+    }
+
+    #[test]
+    fn omitted_directional_pca_cluster_count_fails_when_minimum_is_impossible() {
+        let embedding_spec = EmbeddingSpec {
+            dims: 2,
+            encoding: "f32le".into(),
+        };
+        let block_size_target = serialized_branch_size(&embedding_spec, 8).unwrap();
+
+        let error = derive_auto_sized_cluster_count(3, 3, block_size_target, &embedding_spec)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("cannot satisfy minimum cluster count 3"));
     }
 
     #[test]

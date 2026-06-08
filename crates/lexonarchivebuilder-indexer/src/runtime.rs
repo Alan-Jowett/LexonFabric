@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lexongraph_block::{
-    Block, BlockError, BlockHash, BranchEntry, EmbeddingSpec, LeafEntry, SerializedBlock,
-    VERSION_1, build_branch_block, build_leaf_block, deserialize_block, serialize_block,
+    Block, BlockError, BlockHash, EmbeddingSpec, LeafEntry, SerializedBlock, VERSION_1,
+    build_leaf_block, deserialize_block, serialize_block,
 };
 use lexongraph_block_store::{BlockStore, BlockStoreError};
 use lexongraph_embeddings_trait::{EmbeddingInput, EmbeddingProvider};
@@ -250,6 +250,7 @@ fn resolved_built_in_clustering(
         } => BuiltInClustering::Dcbc(DcbcBuiltInClusteringSettings {
             cluster_count: resolve_cluster_count(
                 *cluster_count,
+                1,
                 estimated_child_count,
                 block_size_target,
                 embedding_spec,
@@ -264,6 +265,7 @@ fn resolved_built_in_clustering(
         } => BuiltInClustering::DirectionalPca(DirectionalPcaBuiltInClusteringSettings {
             cluster_count: resolve_cluster_count(
                 *cluster_count,
+                params.retained_dimension_count.max(1),
                 estimated_child_count,
                 block_size_target,
                 embedding_spec,
@@ -276,6 +278,7 @@ fn resolved_built_in_clustering(
 
 fn resolve_cluster_count(
     explicit_cluster_count: Option<u32>,
+    minimum_cluster_count: usize,
     estimated_child_count: usize,
     block_size_target: usize,
     embedding_spec: &EmbeddingSpec,
@@ -283,6 +286,7 @@ fn resolve_cluster_count(
     match explicit_cluster_count {
         Some(cluster_count) => Ok(cluster_count),
         None => derive_auto_sized_cluster_count(
+            minimum_cluster_count,
             estimated_child_count,
             block_size_target,
             embedding_spec,
@@ -291,26 +295,38 @@ fn resolve_cluster_count(
 }
 
 fn derive_auto_sized_cluster_count(
+    minimum_cluster_count: usize,
     estimated_child_count: usize,
     block_size_target: usize,
     embedding_spec: &EmbeddingSpec,
 ) -> Result<u32, AutoSizingBuiltInClusteringFactoryError> {
+    let minimum_cluster_count = minimum_cluster_count.max(1);
     if estimated_child_count == 0 {
-        return Ok(1);
+        return u32::try_from(minimum_cluster_count).map_err(|_| {
+            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+                "minimum cluster count {minimum_cluster_count} exceeds u32::MAX"
+            ))
+        });
     }
 
     let max_per =
         max_children_per_branch(embedding_spec, block_size_target, estimated_child_count)?;
     if estimated_child_count <= max_per.max(1) {
-        return Ok(1);
+        return u32::try_from(minimum_cluster_count).map_err(|_| {
+            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+                "minimum cluster count {minimum_cluster_count} exceeds u32::MAX"
+            ))
+        });
     }
 
-    let needed = estimated_child_count.div_ceil(max_per.max(2));
+    let needed = estimated_child_count
+        .div_ceil(max_per.max(2))
+        .max(minimum_cluster_count);
     let max_sensible = estimated_child_count / 2;
     if needed > max_sensible {
         return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
             format!(
-                "cannot satisfy minimum two-children-per-branch constraint for {estimated_child_count} children with block size target {block_size_target}"
+                "cannot satisfy minimum cluster count {minimum_cluster_count} and two-children-per-branch constraint for {estimated_child_count} children with block size target {block_size_target}"
             ),
         ));
     }
@@ -370,6 +386,42 @@ fn serialized_branch_size(
     embedding_spec: &EmbeddingSpec,
     entry_count: usize,
 ) -> Result<usize, AutoSizingBuiltInClusteringFactoryError> {
+    if entry_count < 2 {
+        return Err(AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(
+            "branch-size estimation requires at least two entries".into(),
+        ));
+    }
+
+    let embedding_len = expected_embedding_len(embedding_spec)?;
+    let top_level_size = cbor_map_size(4)
+        + cbor_unsigned_field_size(0, VERSION_1)
+        + cbor_unsigned_field_size(1, 1)
+        + cbor_key_size(2)
+        + embedding_spec_cbor_size(embedding_spec)
+        + cbor_key_size(3)
+        + cbor_array_size(entry_count);
+    let entry_size = cbor_map_size(2)
+        + cbor_key_size(0)
+        + cbor_bytes_size(embedding_len)
+        + cbor_key_size(1)
+        + cbor_bytes_size(BlockHash::LEN);
+
+    top_level_size
+        .checked_add(entry_size.checked_mul(entry_count).ok_or_else(|| {
+            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+                "branch-size estimation overflow for {entry_count} entries"
+            ))
+        })?)
+        .ok_or_else(|| {
+            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
+                "branch-size estimation overflow for {entry_count} entries"
+            ))
+        })
+}
+
+fn expected_embedding_len(
+    embedding_spec: &EmbeddingSpec,
+) -> Result<usize, AutoSizingBuiltInClusteringFactoryError> {
     let scalar_width = match embedding_spec.encoding.as_str() {
         "f32le" => 4_u64,
         "f16le" => 2_u64,
@@ -379,7 +431,7 @@ fn serialized_branch_size(
             ));
         }
     };
-    let embedding_len = embedding_spec
+    embedding_spec
         .dims
         .checked_mul(scalar_width)
         .and_then(|length| usize::try_from(length).ok())
@@ -388,34 +440,58 @@ fn serialized_branch_size(
                 "embedding length overflow for {} dimensions with encoding {:?}",
                 embedding_spec.dims, embedding_spec.encoding
             ))
-        })?;
-    let entries = (0..entry_count)
-        .map(|index| BranchEntry {
-            embedding: vec![0; embedding_len],
-            child: synthetic_block_hash(index),
-        })
-        .collect();
-    let branch = build_branch_block(VERSION_1, 1, embedding_spec.clone(), entries, None).map_err(
-        |error| {
-            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
-                "failed to build synthetic branch block: {error}"
-            ))
-        },
-    )?;
-    let block = Block::Branch(branch);
-    serialize_block(&block)
-        .map(|serialized| serialized.bytes.len())
-        .map_err(|error| {
-            AutoSizingBuiltInClusteringFactoryError::DeriveClusterCount(format!(
-                "failed to serialize synthetic branch block: {error}"
-            ))
         })
 }
 
-fn synthetic_block_hash(index: usize) -> BlockHash {
-    let mut bytes = [0_u8; 32];
-    bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
-    BlockHash::from_bytes(bytes)
+fn embedding_spec_cbor_size(embedding_spec: &EmbeddingSpec) -> usize {
+    cbor_map_size(2)
+        + cbor_unsigned_field_size(0, embedding_spec.dims)
+        + cbor_key_size(1)
+        + cbor_text_size(&embedding_spec.encoding)
+}
+
+fn cbor_unsigned_field_size(key: u64, value: u64) -> usize {
+    cbor_key_size(key) + cbor_unsigned_size(value)
+}
+
+fn cbor_key_size(key: u64) -> usize {
+    cbor_unsigned_size(key)
+}
+
+fn cbor_map_size(entry_count: usize) -> usize {
+    cbor_major_size(entry_count)
+}
+
+fn cbor_array_size(entry_count: usize) -> usize {
+    cbor_major_size(entry_count)
+}
+
+fn cbor_text_size(value: &str) -> usize {
+    cbor_major_size(value.len()) + value.len()
+}
+
+fn cbor_bytes_size(byte_len: usize) -> usize {
+    cbor_major_size(byte_len) + byte_len
+}
+
+fn cbor_unsigned_size(value: u64) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=0xff => 2,
+        0x100..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
+}
+
+fn cbor_major_size(value: usize) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=0xff => 2,
+        0x100..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
 }
 
 pub async fn run_request_file(request_path: &Path) -> Result<BatchSummary, RuntimeError> {
@@ -1965,7 +2041,7 @@ mod tests {
         let block_size_target = serialized_branch_size(&embedding_spec, 2).unwrap();
 
         assert_eq!(
-            derive_auto_sized_cluster_count(6, block_size_target, &embedding_spec).unwrap(),
+            derive_auto_sized_cluster_count(1, 6, block_size_target, &embedding_spec).unwrap(),
             3
         );
     }
@@ -2015,6 +2091,75 @@ mod tests {
         .unwrap();
 
         assert_eq!(omitted, explicit);
+    }
+
+    #[test]
+    fn omitted_directional_pca_cluster_count_respects_retained_dimension_count() {
+        let embedding_spec = EmbeddingSpec {
+            dims: 2,
+            encoding: "f32le".into(),
+        };
+        let block_size_target = serialized_branch_size(&embedding_spec, 3).unwrap();
+
+        let omitted = resolved_built_in_clustering(
+            &ConfiguredClustering::DirectionalPca {
+                cluster_count: None,
+                random_seed: None,
+                params: lexongraph_directional_pca::DirectionalPcaParams {
+                    retained_dimension_count: 3,
+                    variance_exponent: 1.0,
+                    temperature: 1.0,
+                    min_input_count: 2,
+                    min_effective_rank: 1,
+                    min_cumulative_variance: 0.0,
+                },
+            },
+            9,
+            block_size_target,
+            &embedding_spec,
+        )
+        .unwrap();
+
+        match omitted {
+            BuiltInClustering::DirectionalPca(settings) => {
+                assert_eq!(settings.cluster_count, 3);
+            }
+            BuiltInClustering::Dcbc(_) => panic!("expected directional-pca settings"),
+        }
+    }
+
+    #[test]
+    fn serialized_branch_size_matches_actual_serialization() {
+        let embedding_spec = EmbeddingSpec {
+            dims: 384,
+            encoding: "f32le".into(),
+        };
+        let entry_count = 37;
+        let embedding_len = expected_embedding_len(&embedding_spec).unwrap();
+        let entries = (0..entry_count)
+            .map(|index| lexongraph_block::BranchEntry {
+                embedding: vec![0; embedding_len],
+                child: BlockHash::from_bytes({
+                    let mut bytes = [0_u8; 32];
+                    bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                    bytes
+                }),
+            })
+            .collect();
+        let branch = lexongraph_block::build_branch_block(
+            VERSION_1,
+            1,
+            embedding_spec.clone(),
+            entries,
+            None,
+        )
+        .unwrap();
+        let serialized = serialize_block(&Block::Branch(branch)).unwrap();
+
+        assert_eq!(
+            serialized_branch_size(&embedding_spec, entry_count).unwrap(),
+            serialized.bytes.len()
+        );
     }
 
     #[tokio::test]

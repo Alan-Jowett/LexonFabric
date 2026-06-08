@@ -58,10 +58,73 @@ struct ReplayBatch {
     completion_message: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmissionProgressKind {
+    Embedding,
+    Replay,
+}
+
+impl SubmissionProgressKind {
+    fn started_message(
+        self,
+        batch_number: usize,
+        total_batches: usize,
+        batch_item_count: usize,
+        completed_items: usize,
+        total_items: usize,
+    ) -> String {
+        match self {
+            Self::Embedding => format!(
+                "Embedding batch {batch_number} of {total_batches} started for {batch_item_count} delegated item(s); completed {completed_items} of {total_items} delegated item(s)"
+            ),
+            Self::Replay => format!(
+                "Submitting replay batch {batch_number} of {total_batches} for {batch_item_count} delegated item(s); completed {completed_items} of {total_items} delegated item(s)"
+            ),
+        }
+    }
+
+    fn heartbeat_message(
+        self,
+        batch_number: usize,
+        total_batches: usize,
+        batch_item_count: usize,
+        completed_items: usize,
+        total_items: usize,
+        elapsed_ms: u128,
+    ) -> String {
+        match self {
+            Self::Embedding => format!(
+                "Embedding batch {batch_number} of {total_batches} still running after {elapsed_ms} ms for {batch_item_count} delegated item(s); completed {completed_items} of {total_items} delegated item(s)"
+            ),
+            Self::Replay => format!(
+                "Replay batch {batch_number} of {total_batches} still running after {elapsed_ms} ms for {batch_item_count} delegated item(s); completed {completed_items} of {total_items} delegated item(s)"
+            ),
+        }
+    }
+
+    fn completion_message(
+        self,
+        batch_number: usize,
+        total_batches: usize,
+        completed_items: usize,
+        total_items: usize,
+    ) -> String {
+        match self {
+            Self::Embedding => format!(
+                "Embedded batch {batch_number} of {total_batches}; completed {completed_items} of {total_items} delegated item(s)"
+            ),
+            Self::Replay => format!(
+                "Submitted replay batch {batch_number} of {total_batches}; completed {completed_items} of {total_items} delegated item(s)"
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct StreamingStageConfig {
     clustering: ConfiguredClustering,
     block_size_target: usize,
+    submission_progress_kind: SubmissionProgressKind,
 }
 
 type ReplayedLeaf = (IndexItem<ContentRef>, Vec<u8>);
@@ -622,6 +685,7 @@ where
             StreamingStageConfig {
                 clustering,
                 block_size_target: request.block_size_target,
+                submission_progress_kind: SubmissionProgressKind::Embedding,
             },
             replay_batches,
             &block_store,
@@ -639,6 +703,7 @@ where
         StreamingStageConfig {
             clustering,
             block_size_target: request.block_size_target,
+            submission_progress_kind: SubmissionProgressKind::Replay,
         },
         replay_batches,
         &block_store,
@@ -766,7 +831,7 @@ fn prepare_request_replay_batches(
 
     sort_replay_items(&mut items);
     let mut replay_batches = chunk_replay_items(items, max_concurrency);
-    annotate_embedding_progress_batches(&mut replay_batches);
+    annotate_submission_progress_batches(&mut replay_batches, SubmissionProgressKind::Embedding);
     Ok(replay_batches)
 }
 
@@ -787,18 +852,20 @@ fn chunk_replay_items(
     batches
 }
 
-fn annotate_embedding_progress_batches(batches: &mut [ReplayBatch]) {
+fn annotate_submission_progress_batches(
+    batches: &mut [ReplayBatch],
+    progress_kind: SubmissionProgressKind,
+) {
     let total_batches = batches.len();
     let total_items: usize = batches.iter().map(|batch| batch.items.len()).sum();
     let mut completed_items = 0usize;
     for (batch_index, batch) in batches.iter_mut().enumerate() {
         completed_items += batch.items.len();
-        batch.completion_message = Some(format!(
-            "Embedded batch {} of {}; completed {} of {} delegated item(s)",
+        batch.completion_message = Some(progress_kind.completion_message(
             batch_index + 1,
             total_batches,
             completed_items,
-            total_items
+            total_items,
         ));
     }
 }
@@ -984,8 +1051,12 @@ where
         let batch_item_count = batch.items.len();
         report_progress(
             progress,
-            format!(
-                "Embedding batch {batch_number} of {total_batches} started for {batch_item_count} delegated item(s); completed {completed_items} of {total_items} delegated item(s)"
+            config.submission_progress_kind.started_message(
+                batch_number,
+                total_batches,
+                batch_item_count,
+                completed_items,
+                total_items,
             ),
         );
         await_with_periodic_progress(
@@ -993,9 +1064,13 @@ where
             progress,
             PROGRESS_HEARTBEAT_INTERVAL,
             |elapsed| {
-                format!(
-                    "Embedding batch {batch_number} of {total_batches} still running after {} ms for {batch_item_count} delegated item(s); completed {completed_items} of {total_items} delegated item(s)",
-                    elapsed.as_millis()
+                config.submission_progress_kind.heartbeat_message(
+                    batch_number,
+                    total_batches,
+                    batch_item_count,
+                    completed_items,
+                    total_items,
+                    elapsed.as_millis(),
                 )
             },
         )
@@ -1005,6 +1080,12 @@ where
             report_progress(progress, message.clone());
         }
     }
+    report_progress(
+        progress,
+        format!(
+            "Submitted all {total_batches} replay batch(es); waiting for training pass completion over {total_items} delegated item(s)"
+        ),
+    );
     let pass_report = indexer.finish_pass()?;
     report_progress(
         progress,
@@ -1118,8 +1199,10 @@ fn load_replay_batches_from_store(
             items.len()
         ),
     );
+    let mut replay_batches = chunk_replay_items(items, max_concurrency);
+    annotate_submission_progress_batches(&mut replay_batches, SubmissionProgressKind::Replay);
     Ok((
-        chunk_replay_items(items, max_concurrency),
+        replay_batches,
         StoredLeafEmbeddingProvider {
             embeddings_by_input_hash: Arc::new(embeddings_by_input_hash),
         },
@@ -1623,6 +1706,109 @@ mod tests {
             progress
                 .iter()
                 .any(|line| line.contains("Streaming training complete"))
+        );
+        assert!(progress.iter().any(|line| {
+            line.contains("Submitted all 1 replay batch(es); waiting for training pass completion")
+        }));
+        server.join();
+    }
+
+    #[tokio::test]
+    async fn clustering_only_stage_reports_replay_submission_progress_and_handoff() {
+        let temp = tempdir().unwrap();
+        let document_names = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        let items = document_names
+            .iter()
+            .map(|name| {
+                let path = temp.path().join(format!("{name}.txt"));
+                fs::write(&path, format!("{name}\n")).unwrap();
+                BatchItemConfig::Document {
+                    path: path.strip_prefix(temp.path()).unwrap().to_path_buf(),
+                    metadata: BTreeMap::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let server = spawn_embedding_server(document_names.len());
+        let seed_request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: server.base_url.clone(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::FullPipeline,
+            max_concurrency: Some(2),
+            items,
+        };
+        run_request(temp.path(), seed_request).await.unwrap();
+
+        let cluster_only_request = BatchRequest {
+            environment: EnvironmentConfig::Local {
+                block_store_root: Path::new("blocks").to_path_buf(),
+                embedding: LocalEmbeddingConfig {
+                    base_url: String::new(),
+                    model: "all-MiniLM-L6-v2".into(),
+                    api_key_env: None,
+                    request_timeout_secs: 5,
+                    max_retries: 0,
+                    retry_delay_ms: 1,
+                },
+            },
+            embedding_spec: EmbeddingSpecConfig {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            block_size_target: 65_536,
+            stage: ExecutionStage::ClusteringAndBlockAssembly,
+            max_concurrency: Some(2),
+            items: vec![],
+        };
+
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_capture = Arc::clone(&progress);
+        let _summary = run_request_with_progress(
+            temp.path(),
+            cluster_only_request,
+            ClusteringConfigOverrides::default(),
+            move |message| {
+                progress_capture.lock().unwrap().push(message);
+            },
+        )
+        .await
+        .unwrap();
+
+        let progress = progress.lock().unwrap();
+        assert!(progress.iter().any(|line| {
+            line.contains("Submitting replay batch 1 of 3")
+                && line.contains("completed 0 of 5 delegated item(s)")
+        }));
+        assert!(progress.iter().any(|line| {
+            line.contains("Submitted replay batch 1 of 3")
+                && line.contains("completed 2 of 5 delegated item(s)")
+        }));
+        assert!(progress.iter().any(|line| {
+            line.contains("Submitted replay batch 3 of 3")
+                && line.contains("completed 5 of 5 delegated item(s)")
+        }));
+        assert!(progress.iter().any(|line| {
+            line.contains("Submitted all 3 replay batch(es); waiting for training pass completion")
+                && line.contains("5 delegated item(s)")
+        }));
+        assert!(
+            progress
+                .iter()
+                .any(|line| line.contains("Training pass 1 started for 5 item(s)"))
         );
         server.join();
     }

@@ -6,7 +6,7 @@ Phase 2 validation patch for the approved email-artifact, chunk-level
 indexing, local filesystem block-store interoperability, replay-based
 streaming delegated indexing, stage-selectable execution, standalone
 clustering input discovery, clustering-algorithm selection, clustering-option
-exposure, streaming-status observability, replay-stable fingerprinting, and
+exposure, replay-submission and streaming-status observability, replay-stable fingerprinting, and
 layer-parallel
 block-construction evolution in
 `docs/specs/lexonarchivebuilder-indexer/requirements.md` and
@@ -19,7 +19,7 @@ LexonArchiveBuilder-owned indexer boundary, including local filesystem
 block-store interoperability, replay-based streaming delegated indexing,
 stage-selectable execution, standalone clustering input discovery, explicit
 delegated clustering-algorithm selection, algorithm-specific clustering-option
-exposure, embedding-phase batch-progress observability, streaming-status
+exposure, embedding-phase batch-progress observability, replay-submission observability, streaming-status
 observability, replay-stable fingerprinting, and leaf-layer parallel block
 scheduling in the local/testing profile.
 
@@ -374,6 +374,33 @@ non-empty batch, the normal batch log stream continues to report progress by
 bounded work units or bounded elapsed time while delegated embedding work
 remains outstanding, rather than remaining silent until the first downstream
 streaming-status event or the final summary.
+
+**Traces to:** RQ-INDEXER-008B, DSG-LFI-002A, DSG-LFI-002B
+
+### VAL-LFI-007D
+
+Run the clustering-only stage against a block-store snapshot large enough to
+reconstruct more than one replay batch before the first upstream
+training-pass-completion wait.
+
+**Pass condition:** the normal batch log stream emits one repository-owned
+progress update after each replay-batch submission that reports completed
+batches and cumulative delegated-item submission relative to the known replay
+total for the invocation, so an operator can observe LexonArchiveBuilder-owned
+submission progress before any upstream in-phase counts are available.
+
+**Traces to:** RQ-INDEXER-003E, RQ-INDEXER-008B, DSG-LFI-001E, DSG-LFI-002A
+
+### VAL-LFI-007E
+
+Run a clustering-only stage through the point where all replay batches have been
+submitted and upstream training pass completion remains outstanding.
+
+**Pass condition:** the normal batch log stream emits an explicit handoff
+message when repository-owned replay submission completes and the runtime begins
+waiting for upstream training-pass completion, and later upstream observer
+heartbeats remain distinguishable from that local handoff rather than implying
+that additional replay batches are still being submitted.
 
 **Traces to:** RQ-INDEXER-008B, DSG-LFI-002A, DSG-LFI-002B
 

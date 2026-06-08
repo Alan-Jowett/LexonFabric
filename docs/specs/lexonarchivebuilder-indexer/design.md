@@ -6,7 +6,7 @@ Phase 2 specification patch for the approved email-artifact, chunk-level
 indexing, local filesystem block-store interoperability, replay-based
 streaming delegated indexing, stage-selectable execution, standalone
 clustering input discovery, clustering-algorithm selection, clustering-option
-exposure, streaming-status observability, replay-stable fingerprinting, and
+exposure, replay-submission and streaming-status observability, replay-stable fingerprinting, and
 layer-parallel
 block-construction evolution in
 `docs/specs/lexonarchivebuilder-indexer/requirements.md`.
@@ -20,7 +20,7 @@ units plus the local filesystem block-store interoperability correction,
 replay-based streaming delegated indexing adoption, stage-selectable execution,
 standalone clustering input discovery, delegated clustering-algorithm
 selection, algorithm-specific clustering-option exposure, embedding-phase
-batch-progress observability, streaming-status observability, replay-stable delegated item
+batch-progress observability, replay-submission observability, streaming-status observability, replay-stable delegated item
 identity, and layer-parallel delegated block
 construction for the local/testing profile.
 
@@ -84,8 +84,8 @@ The LexonArchiveBuilder indexer design is intended to be:
 - bounded by an administrator-controlled concurrency budget
 - stage-selectable at the same batch boundary across CLI and request-file use
 - explicit about delegated clustering selection and option defaulting
-- observable during long-running mailbox batches, local embedding work, and
-  streaming finalization work
+- observable during long-running mailbox batches, local embedding work,
+  clustering-only replay submission, and streaming finalization work
 - chunk-first for email retrieval while preserving full-message and source
   provenance artifacts
 
@@ -370,6 +370,22 @@ includes either bounded-work-unit or bounded-elapsed-time progress signaling
 for local embedding or leaf-materialization work on that same runtime-visible
 surface.
 
+For clustering-only replay, the repository-owned runtime already knows the
+reconstructed replay-batch count and cumulative delegated-item total before the
+first upstream training-pass heartbeat arrives. The design therefore emits one
+repository-owned completion signal after each replay-batch submission that
+reports completed batches and cumulative delegated items relative to the known
+invocation total, rather than relying only on later observer heartbeats with
+phase-level elapsed-time visibility.
+
+When the last repository-owned replay batch has been submitted and control moves
+from local submission into waiting for upstream training-pass completion, the
+same runtime-visible progress stream emits an explicit handoff marker. That
+marker distinguishes "all known replay batches submitted; waiting on delegated
+training pass completion" from the later upstream observer heartbeats so
+operators can tell whether LexonArchiveBuilder is still feeding the streaming API
+or is already blocked on downstream work.
+
 **Traces to:** RQ-INDEXER-001, RQ-INDEXER-008B
 
 ### DSG-LFI-002B `Streaming status signaling`
@@ -387,6 +403,12 @@ Because the upstream observer seam begins only once downstream streaming work is
 active, this observer translation complements rather than replaces
 repository-owned progress signaling for the earlier local embedding or
 leaf-materialization gap covered by `DSG-LFI-002A`.
+
+The observer translation layer therefore preserves the boundary between
+repository-owned submission progress and upstream phase progress. It does not
+reinterpret upstream `InProgress` heartbeats as proof that additional replay
+batches are still being submitted once the repository-owned handoff marker has
+been emitted.
 
 **Traces to:** RQ-INDEXER-008B, RQ-INDEXER-010A
 

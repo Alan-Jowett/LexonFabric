@@ -4,7 +4,7 @@
 
 - **Phase:** Phase 2 - Specification Changes
 - **Status:** Approved streaming-indexer migration and clustering-configuration requirements patch being propagated into design and validation
-- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, embedding-phase and streaming-status observability, and layer-parallel block-construction evolution
+- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, embedding-phase, replay-submission, and streaming-status observability, and layer-parallel block-construction evolution
 
 ## USER-REQUEST
 
@@ -66,6 +66,8 @@
 - **UR-56 [KNOWN]:** When a clustering-enabled run omits `cluster_count`, LexonArchiveBuilder should auto-size the effective cluster count from the number of blocks being clustered and the embedding size instead of falling back to a small fixed default.
 - **UR-57 [KNOWN]:** This auto-sizing rule should apply consistently to both built-in clustering algorithms currently exposed by LexonGraph.
 - **UR-58 [KNOWN]:** An explicit caller-supplied `cluster_count` should continue to override auto-sizing; the derived count is only for the omitted-option path.
+- **UR-59 [KNOWN]:** During clustering-only replay, LexonArchiveBuilder should report repository-owned replay-batch submission progress using the batch count and cumulative delegated-item count it already knows, so operators can see how much work has been submitted to the streaming API.
+- **UR-60 [KNOWN]:** When LexonArchiveBuilder finishes submitting replay batches and begins waiting for upstream training-pass completion, the runtime progress stream should emit an explicit phase-boundary message so operators can distinguish local submission progress from upstream training-pass heartbeats.
 
 ## Change Manifest
 
@@ -104,6 +106,8 @@
 | CM-INDEXER-031 | Add | Preserve replay-safe and environment-neutral clustering behavior by treating the effective clustering algorithm and option set as part of the approved batch orchestration contract | UR-12, UR-13, UR-39, UR-50, UR-52 |
 | CM-INDEXER-032 | Revise | Tighten progress observability so ingestion-plus-embedding runs remain visibly active during long-running embedding or leaf-materialization work between mailbox expansion and downstream streaming-status events | UR-32, UR-41, UR-54, UR-55 |
 | CM-INDEXER-033 | Revise | Require omitted `cluster_count` to derive from clustering input count and embedding-driven branch capacity for every supported built-in clustering algorithm while preserving explicit caller override behavior | UR-52, UR-53, UR-56, UR-57, UR-58 |
+| CM-INDEXER-034 | Revise | Require clustering-only replay to emit repository-owned replay-batch submission progress that reports completed batches and cumulative delegated items relative to the known invocation total | UR-32, UR-39, UR-59 |
+| CM-INDEXER-035 | Add | Require an explicit runtime-visible handoff between repository-owned replay submission and upstream training-pass completion waiting so operator logs disambiguate local submission from upstream heartbeats | UR-41, UR-48, UR-60 |
 
 ## Before / After
 
@@ -271,6 +275,16 @@
 
 - **Before [KNOWN]:** The requirements allowed omitted clustering settings to resolve to repository defaults, but they did not explicitly require omitted `cluster_count` to auto-size consistently across all supported built-in clustering algorithms.
 - **After [KNOWN]:** The requirements now require omitted `cluster_count` to derive from clustering input count plus embedding-size-aware branch capacity for every supported built-in clustering algorithm, while preserving explicit caller-provided `cluster_count` as an override.
+
+### BA-INDEXER-034
+
+- **Before [KNOWN]:** Progress observability required visible mailbox, embedding, training, and finalization activity, but it did not explicitly require clustering-only replay to report repository-owned replay-batch submission progress using the known batch and delegated-item totals.
+- **After [KNOWN]:** The requirements now require clustering-only replay to emit repository-owned progress after each replay batch submission, including completed-batch and cumulative delegated-item visibility relative to the known invocation total.
+
+### BA-INDEXER-035
+
+- **Before [KNOWN]:** Runtime progress could transition from repository-owned replay submission into upstream training-pass heartbeats without an explicit boundary marker, so operators could not tell whether LexonArchiveBuilder was still submitting work or was already waiting for upstream pass completion.
+- **After [KNOWN]:** The requirements now require an explicit runtime-visible handoff when repository-owned replay submission completes and the runtime begins waiting for upstream training-pass completion or an equivalent delegated lifecycle boundary.
 
 ## Requirements
 
@@ -609,6 +623,8 @@ advances, and clustering or block assembly advances.
   summary is emitted.
 - **Streaming lifecycle visibility [KNOWN]:** Progress output must remain meaningful across upstream training passes, training completion, and final materialization without requiring callers to understand raw upstream phase names.
 - **Embedding-phase visibility [KNOWN]:** For any execution stage that includes ingestion plus embedding generation, progress output must continue after delegated items have been prepared and while local embedding or leaf-materialization work is still consuming those delegated items.
+- **Replay-submission visibility [KNOWN]:** For any execution stage that submits known replay batches to the delegated streaming API, including clustering-only execution reconstructed from stored leaf blocks, progress output must report repository-owned replay-batch submission completion in bounded work units using the known batch count and cumulative delegated-item count for the invocation.
+- **Phase-boundary clarity [KNOWN]:** When repository-owned replay-batch submission completes and LexonArchiveBuilder begins waiting for upstream training-pass completion or an equivalent delegated lifecycle boundary, the runtime progress stream must emit an explicit handoff message so operators can distinguish local submission completion from subsequent upstream observer heartbeats.
 - **Gap constraint [INFERRED]:** A non-empty ingestion-plus-embedding run SHALL NOT rely on one mailbox-preparation message and then remain silent until the first downstream streaming-status event or final summary; operators must receive continued liveness or completed-work visibility while delegated embedding work remains outstanding.
 - **Cadence boundary [INFERRED]:** The requirements do not fix an exact log-line schema or interval, but the runtime-visible signal must advance by bounded work units or bounded elapsed time rather than only at phase boundaries.
 - **Surface [KNOWN]:** Progress output should be emitted on the normal
@@ -621,8 +637,9 @@ advances, and clustering or block assembly advances.
 - **Observer integration [KNOWN]:** LexonArchiveBuilder SHALL implement the upstream
   streaming status-observer seam and translate observer events onto the same
   runtime progress surface used for mailbox and delegated-indexing progress.
+- **Boundary discipline [INFERRED]:** Repository-owned progress messages SHOULD make clear when they describe local replay submission state versus upstream observer-reported training, clustering, or materialization state, even when the upstream observer does not expose in-phase processed-versus-remaining counts.
 - **Non-goal [KNOWN]:** This requirement does not introduce a separate control-plane, metrics backend, or MCP-surface change.
-- **Traceability:** UR-32, UR-33, UR-41, UR-45, UR-48
+- **Traceability:** UR-32, UR-33, UR-39, UR-41, UR-45, UR-48, UR-59, UR-60
 
 ### Boundary and Invariant Requirements
 
@@ -688,7 +705,7 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 | Architecture remains extensible to future content types | Preserved | Collection-oriented input still covers both mailbox and document collections, and stage selection is defined in generic pipeline terms rather than mailbox-specific behavior |
 | Idempotence and recoverability stay aligned with underlying immutable block semantics | Preserved with clarified scope | Requirements extend hash-addressed identity expectations to normalized email artifacts and require clustering-only reruns over the same clustering-eligible block-store snapshot to remain semantically stable under unchanged upstream semantics |
 | Local development remains self-contained and batch-oriented | Preserved | Docker Compose is constrained to compose local dependencies around the batch container rather than changing the runtime model |
-| Long-running batches remain observable without adding a control plane | Preserved with clarified scope | Progress reporting remains on the existing batch-runtime log surface and now explicitly includes the long-running embedding or leaf-materialization gap between mailbox expansion and downstream streaming-status visibility |
+| Long-running batches remain observable without adding a control plane | Preserved with clarified scope | Progress reporting remains on the existing batch-runtime log surface and now explicitly includes the long-running embedding or leaf-materialization gap between mailbox expansion and downstream streaming-status visibility plus clustering-only replay submission progress and the handoff into upstream training-pass waiting |
 | Caller-visible indexing and MCP contracts remain stable across the upstream API migration | Preserved | The streaming lifecycle is constrained to an internal adaptation behind the existing stage surface and unchanged MCP retrieval semantics |
 | Clustering configuration remains explicit and replayable | Preserved with clarified scope | Requirements now treat the effective clustering algorithm and option set as part of clustering-enabled orchestration input and constrain defaults to resolve deterministically |
 | Omitted clustering-size behavior remains deterministic and safe across algorithms | Preserved with clarified scope | Requirements now constrain omitted `cluster_count` to derive from input count plus embedding-aware branch capacity for every supported built-in algorithm while preserving explicit caller override behavior |
@@ -759,6 +776,7 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
   - user clarification in this session selecting: "Keep the existing final-root BatchSummary"
   - user request in this session: "the LexonGraph crate has been updated again. It now requires selection of clustering algorithm and options. Update the latest LexonGraph and expose these options via command line (feel free to pick reasonable defaults for unspecified options)"
   - user request in this session: "the current builder doesn't report progress during them embedding phase: Processed mailbox /workspace/examples/local/scale-test/runs/20260607T204011Z/fetched/01-rsync.ietf.org__mailman-archive_ipsec_/2026-06.mail: 5 message(s), 10 delegated item(s) Prepared 10 delegated item(s) from mailbox /workspace/examples/local/scale-test/runs/20260607T204011Z/fetched/01-rsync.ietf.org__mailman-archive_ipsec_/2026-06.mail it reported this and then nothing. I see the embedding service hitting 8 cpu worth of work, so it's running but doesn't show progress"
+  - user request in this session: "but it knows it has submitted batch N/M? It should log after each batch is submitted with N items submitted out of M items total?"
   - `crates/lexonarchivebuilder-indexer/src/runtime.rs:391-418`
   - `crates/lexonarchivebuilder-indexer/src/runtime.rs:457-579`
   - `crates/lexonarchivebuilder-indexer/src/runtime.rs:594-628`

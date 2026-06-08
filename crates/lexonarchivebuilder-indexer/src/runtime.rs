@@ -118,6 +118,17 @@ impl SubmissionProgressKind {
             ),
         }
     }
+
+    fn handoff_message(self, total_batches: usize, total_items: usize) -> String {
+        match self {
+            Self::Embedding => format!(
+                "Submitted all {total_batches} embedding batch(es); waiting for training pass completion over {total_items} delegated item(s)"
+            ),
+            Self::Replay => format!(
+                "Submitted all {total_batches} replay batch(es); waiting for training pass completion over {total_items} delegated item(s)"
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1082,9 +1093,9 @@ where
     }
     report_progress(
         progress,
-        format!(
-            "Submitted all {total_batches} replay batch(es); waiting for training pass completion over {total_items} delegated item(s)"
-        ),
+        config
+            .submission_progress_kind
+            .handoff_message(total_batches, total_items),
     );
     let pass_report = indexer.finish_pass()?;
     report_progress(
@@ -1707,6 +1718,9 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Streaming training complete"))
         );
+        assert!(progress.iter().any(|line| {
+            line.contains("embedding batch(es); waiting for training pass completion")
+        }));
         server.join();
     }
 

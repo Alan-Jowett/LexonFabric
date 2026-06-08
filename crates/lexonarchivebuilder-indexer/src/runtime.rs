@@ -47,6 +47,19 @@ struct StagedBlocks {
     blocks: Vec<SerializedBlock>,
 }
 
+fn content_preview(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut preview = String::new();
+    for ch in compact.chars().take(CONTENT_PREVIEW_CHAR_LIMIT) {
+        preview.push(ch);
+    }
+    if compact.chars().count() > CONTENT_PREVIEW_CHAR_LIMIT {
+        preview.push_str("...");
+    }
+    preview
+}
+
 #[derive(Debug, Default)]
 struct ConstructedBlocks {
     block_ids: Vec<BlockHash>,
@@ -132,12 +145,28 @@ struct EmbeddingHealthDiagnostics {
     zero_vector_count: usize,
     repeated_embedding_count: usize,
     unique_embedding_count: usize,
+    repeated_embedding_group_count: usize,
+    max_repeated_embedding_occurrence: Option<usize>,
     min_l2_norm: Option<f64>,
     max_l2_norm: Option<f64>,
     mean_l2_norm: Option<f64>,
     non_zero_variance_dimension_count: Option<usize>,
     max_component_variance: Option<f64>,
+    top_repeated_embedding_groups: Vec<RepeatedEmbeddingGroupDiagnostics>,
     suspicious_input_sample: Vec<SuspiciousClusteringFailureInput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct RepeatedEmbeddingGroupDiagnostics {
+    embedding_fingerprint: String,
+    occurrence_count: usize,
+    sample_inputs: Vec<RepeatedEmbeddingSampleDiagnostics>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct RepeatedEmbeddingSampleDiagnostics {
+    input: ClusteringFailureInput,
+    content_preview: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -659,11 +688,13 @@ fn effective_clustering_diagnostics(
 
 const SUSPICIOUS_INPUT_SAMPLE_LIMIT: usize = 5;
 const VARIANCE_EPSILON: f64 = 1e-12;
+const CONTENT_PREVIEW_CHAR_LIMIT: usize = 160;
 
 #[derive(Clone, Debug, Default)]
 struct EmbeddingObservation {
     fingerprint: Option<String>,
     l2_norm: Option<f64>,
+    content_preview: Option<String>,
     missing: bool,
     undecodable: bool,
     non_finite: bool,
@@ -703,9 +734,11 @@ fn build_embedding_health_diagnostics(
             continue;
         };
         let input_hash = hash_embedding_content(&content.media_type, &content.body).into_bytes();
+        let content_preview = Some(content_preview(&content.body));
         let Some(embedding_bytes) = embedding_source.embedding_for_hash(&input_hash) else {
             missing_embedding_count += 1;
             observations.push(EmbeddingObservation {
+                content_preview,
                 missing: true,
                 ..EmbeddingObservation::default()
             });
@@ -720,6 +753,7 @@ fn build_embedding_health_diagnostics(
                 undecodable_embedding_count += 1;
                 observations.push(EmbeddingObservation {
                     fingerprint: Some(fingerprint),
+                    content_preview,
                     undecodable: true,
                     ..EmbeddingObservation::default()
                 });
@@ -732,6 +766,7 @@ fn build_embedding_health_diagnostics(
             non_finite_embedding_count += 1;
             observations.push(EmbeddingObservation {
                 fingerprint: Some(fingerprint),
+                content_preview,
                 non_finite: true,
                 ..EmbeddingObservation::default()
             });
@@ -774,6 +809,7 @@ fn build_embedding_health_diagnostics(
         observations.push(EmbeddingObservation {
             fingerprint: Some(fingerprint),
             l2_norm: Some(l2_norm),
+            content_preview,
             zero_vector,
             ..EmbeddingObservation::default()
         });
@@ -784,6 +820,15 @@ fn build_embedding_health_diagnostics(
         .map(|count| count.saturating_sub(1))
         .sum();
     let unique_embedding_count = fingerprint_counts.len();
+    let repeated_embedding_group_count = fingerprint_counts
+        .values()
+        .filter(|count| **count > 1)
+        .count();
+    let max_repeated_embedding_occurrence = fingerprint_counts
+        .values()
+        .copied()
+        .filter(|count| *count > 1)
+        .max();
     let mean_l2_norm =
         (finite_embedding_count > 0).then(|| norm_sum / finite_embedding_count as f64);
 
@@ -812,6 +857,43 @@ fn build_embedding_health_diagnostics(
         };
     let collapsed_variance_population =
         non_zero_variance_dimension_count.is_some_and(|count| count <= 1);
+
+    let mut fingerprint_sample_inputs =
+        HashMap::<String, Vec<RepeatedEmbeddingSampleDiagnostics>>::with_capacity(
+            fingerprint_counts.len(),
+        );
+    for (input, observation) in inputs.iter().zip(observations.iter()) {
+        let Some(fingerprint) = observation.fingerprint.as_ref() else {
+            continue;
+        };
+        let sample_inputs = fingerprint_sample_inputs
+            .entry(fingerprint.clone())
+            .or_default();
+        if sample_inputs.len() < SUSPICIOUS_INPUT_SAMPLE_LIMIT {
+            sample_inputs.push(RepeatedEmbeddingSampleDiagnostics {
+                input: input.clone(),
+                content_preview: observation.content_preview.clone(),
+            });
+        }
+    }
+    let mut top_repeated_embedding_groups = fingerprint_counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(fingerprint, count)| RepeatedEmbeddingGroupDiagnostics {
+            embedding_fingerprint: fingerprint.clone(),
+            occurrence_count: *count,
+            sample_inputs: fingerprint_sample_inputs
+                .remove(fingerprint)
+                .unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    top_repeated_embedding_groups.sort_by(|left, right| {
+        right
+            .occurrence_count
+            .cmp(&left.occurrence_count)
+            .then_with(|| left.embedding_fingerprint.cmp(&right.embedding_fingerprint))
+    });
+    top_repeated_embedding_groups.truncate(SUSPICIOUS_INPUT_SAMPLE_LIMIT);
 
     let mut suspicious_input_sample = Vec::new();
     for (input, observation) in inputs.iter().zip(observations.iter()) {
@@ -865,11 +947,14 @@ fn build_embedding_health_diagnostics(
         zero_vector_count,
         repeated_embedding_count,
         unique_embedding_count,
+        repeated_embedding_group_count,
+        max_repeated_embedding_occurrence,
         min_l2_norm,
         max_l2_norm,
         mean_l2_norm,
         non_zero_variance_dimension_count,
         max_component_variance,
+        top_repeated_embedding_groups,
         suspicious_input_sample,
     }
 }
@@ -3673,6 +3758,17 @@ mod tests {
         assert_eq!(diagnostics.zero_vector_count, 1);
         assert_eq!(diagnostics.repeated_embedding_count, 1);
         assert_eq!(diagnostics.unique_embedding_count, 2);
+        assert_eq!(diagnostics.repeated_embedding_group_count, 1);
+        assert_eq!(diagnostics.max_repeated_embedding_occurrence, Some(2));
+        assert_eq!(diagnostics.top_repeated_embedding_groups.len(), 1);
+        assert_eq!(
+            diagnostics.top_repeated_embedding_groups[0].occurrence_count,
+            2
+        );
+        assert_eq!(
+            diagnostics.top_repeated_embedding_groups[0].sample_inputs[0].content_preview,
+            Some("beta".into())
+        );
         assert_eq!(diagnostics.suspicious_input_sample.len(), 4);
         assert!(
             diagnostics
@@ -3771,11 +3867,14 @@ mod tests {
             zero_vector_count: 1,
             repeated_embedding_count: 0,
             unique_embedding_count: 1,
+            repeated_embedding_group_count: 0,
+            max_repeated_embedding_occurrence: None,
             min_l2_norm: Some(0.0),
             max_l2_norm: Some(0.0),
             mean_l2_norm: Some(0.0),
             non_zero_variance_dimension_count: Some(0),
             max_component_variance: Some(0.0),
+            top_repeated_embedding_groups: Vec::new(),
             suspicious_input_sample: vec![SuspiciousClusteringFailureInput {
                 input: ClusteringFailureInput::Document {
                     logical_id: "document:alpha.txt".into(),

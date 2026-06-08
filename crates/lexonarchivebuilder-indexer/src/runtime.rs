@@ -1432,7 +1432,7 @@ fn format_indexing_status(status: StreamingIndexingStatus) -> String {
             StreamingIndexingStatusState::Failed,
         ) => {
             format!(
-                "{} failed after {elapsed_ms} ms after processing {} stage-local item(s): {}",
+                "{} failed after {elapsed_ms} ms; processed {} stage-local item(s): {}",
                 format_planning_stage(stage),
                 status.completed_unit_count,
                 status.error.unwrap_or_else(|| "unknown error".into())
@@ -1528,13 +1528,13 @@ fn format_indexing_status(status: StreamingIndexingStatus) -> String {
             StreamingIndexingStatusState::Failed,
         ) => match status.phase_total_unit_count {
             Some(group_total) => format!(
-                "Bottom-up assembly for layer {layer_index} failed after {elapsed_ms} ms after completing {} of {group_total} group(s) from {} input block(s): {}",
+                "Bottom-up assembly for layer {layer_index} failed after {elapsed_ms} ms; completed {} of {group_total} group(s) from {} input block(s): {}",
                 status.completed_unit_count,
                 status.item_count,
                 status.error.unwrap_or_else(|| "unknown error".into())
             ),
             None => format!(
-                "Bottom-up assembly for layer {layer_index} failed after {elapsed_ms} ms after completing {} group(s) from {} input block(s): {}",
+                "Bottom-up assembly for layer {layer_index} failed after {elapsed_ms} ms; completed {} group(s) from {} input block(s): {}",
                 status.completed_unit_count,
                 status.item_count,
                 status.error.unwrap_or_else(|| "unknown error".into())
@@ -2633,6 +2633,46 @@ mod tests {
         assert_eq!(
             format_indexing_status(status),
             "Bottom-up assembly for layer 1 still running after 44 ms; completed 2 group(s) so far from 8 input block(s)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_failure_uses_single_temporal_clause() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::Failed,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 3,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: Some("boom".into()),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning failed after 125 ms; processed 3 stage-local item(s): boom"
+        );
+    }
+
+    #[test]
+    fn bottom_up_assembly_failure_uses_single_temporal_clause() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::BottomUpAssembly { layer_index: 2 },
+            state: StreamingIndexingStatusState::Failed,
+            item_count: 12,
+            phase_total_unit_count: Some(3),
+            completed_unit_count: 2,
+            remaining_unit_count: Some(1),
+            elapsed: Duration::from_millis(88),
+            error: Some("boom".into()),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "Bottom-up assembly for layer 2 failed after 88 ms; completed 2 of 3 group(s) from 12 input block(s): boom"
         );
     }
 

@@ -343,7 +343,7 @@ where
             for ((index, input), embedding) in missing_indices
                 .into_iter()
                 .zip(missing_inputs.iter())
-                .zip(fetched_embeddings.into_iter())
+                .zip(fetched_embeddings)
             {
                 cache.insert(hash_embedding_input(input).into_bytes(), embedding.clone());
                 embeddings[index] = Some(embedding);

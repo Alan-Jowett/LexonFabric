@@ -3,8 +3,8 @@
 ## Document Status
 
 - **Phase:** Phase 1 - Requirements Discovery
-- **Status:** Approved streaming-indexer migration baseline with incremental requirements patches for latest LexonGraph planning-policy and telemetry compatibility, upstream regression assessment, clustering-failure diagnostics, rooted block-tree quality assessment discovery plus quality-metric refinement, and rooted CLI search discovery
-- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream regression assessment, embedding-phase, replay-submission and streaming-status observability, clustering-failure diagnosability, rooted block-tree quality assessment with refined per-layer quality metrics, rooted CLI search over stored trees, and layer-parallel block-construction evolution
+- **Status:** Approved streaming-indexer migration baseline with incremental requirements patches for latest LexonGraph planning-policy and telemetry compatibility, upstream regression assessment, clustering-failure diagnostics, rooted block-tree quality assessment discovery plus quality-metric refinement, rooted TNN-recall diagnostics, and rooted CLI search discovery
+- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream regression assessment, embedding-phase, replay-submission and streaming-status observability, clustering-failure diagnosability, rooted block-tree quality assessment with refined per-layer quality metrics and rooted TNN-recall diagnostics, rooted CLI search over stored trees, and layer-parallel block-construction evolution
 
 ## USER-REQUEST
 
@@ -108,6 +108,19 @@
 - **UR-98 [KNOWN]:** For each block, the rooted quality tool should measure quantile-bin occupancy counts plus the variance of those occupancies, and detect empty bins plus bins whose occupancy exceeds two times the expected value so quantile failures and misaligned PCA axes become visible.
 - **UR-99 [KNOWN]:** For every parent block and its children, the rooted quality tool should compute the percentage of children whose dispersion exceeds the parent's, the mean increase for such cases, and the maximum observed increase so multimodal parents and ineffective splits become visible.
 - **UR-100 [KNOWN]:** In this increment, the number of quantile bins should remain a repository-defined default rather than an operator-visible parameter.
+- **UR-101 [KNOWN]:** Add a new rooted quality diagnostic for True Nearest Neighbor Recall at Recall@1, Recall@5, and Recall@10.
+- **UR-102 [KNOWN]:** The system shall support TNN-Recall using randomly sampled embeddings from the corpus, and this corpus-based mode shall be the default and the source of all aggregate recall metrics.
+- **UR-103 [KNOWN]:** Corpus-based TNN-Recall sampling must be uniform over the evaluated embedding set.
+- **UR-104 [KNOWN]:** Corpus-based TNN-Recall sampling must be reproducible given a seed.
+- **UR-105 [KNOWN]:** Corpus-based TNN-Recall sample size must be configurable.
+- **UR-106 [KNOWN]:** Corpus-based TNN-Recall must be the mode used for mean recall, standard-deviation recall, and recall histograms.
+- **UR-107 [KNOWN]:** The system may support TNN-Recall evaluation using user-supplied query embeddings as a diagnostic tool only.
+- **UR-108 [KNOWN]:** For user-query TNN-Recall, the system shall compute Recall@1, Recall@5, and Recall@10 for the supplied query.
+- **UR-109 [KNOWN]:** For user-query TNN-Recall, the system shall report the exact neighbors and approximate neighbors for comparison.
+- **UR-110 [KNOWN]:** User-query TNN-Recall results shall be labeled as diagnostic recall.
+- **UR-111 [KNOWN]:** The system shall clearly distinguish corpus-based recall as a statistical quality metric from user-query recall as a debugging aid.
+- **UR-112 [KNOWN]:** For this rooted quality tool, the corpus-based TNN-Recall evaluation corpus should be the embeddings reachable from the caller-supplied root rather than all embeddings visible in the configured block store.
+- **UR-113 [KNOWN]:** Corpus-based rooted TNN-Recall traversal width must be configurable so operators can measure recall as traversal width changes.
 
 ## Change Manifest
 
@@ -164,6 +177,10 @@
 | CM-INDEXER-049 | Add | Introduce a CLI-only rooted search tool that embeds caller-provided text through a caller-provided embedding endpoint, searches a caller-selected rooted tree through `lexongraph-search`, and returns the top `k` matching leaf nodes | UR-88, UR-89 |
 | CM-INDEXER-050 | Add | Keep the rooted search tool additive to MCP search while requiring both human-readable and machine-readable result output without introducing a second repository-local search corpus model | UR-90, UR-91, UR-92 |
 | CM-INDEXER-051 | Revise | Refine rooted quality assessment so quality reporting covers tree consistency plus per-layer cohesion, separation, PCA-axis, quantile-occupancy, and parent-child split-effectiveness statistics; parent-versus-child spread inversions become aggregate counts rather than per-pair warnings | UR-82, UR-83, UR-93, UR-94, UR-95, UR-96, UR-97, UR-98, UR-99, UR-100 |
+| CM-INDEXER-052 | Revise | Extend rooted quality assessment with TNN-Recall at Recall@1, Recall@5, and Recall@10 over the rooted reachable embedding corpus | UR-101, UR-102, UR-112 |
+| CM-INDEXER-053 | Add | Require corpus-based TNN-Recall to use uniform, seeded, configurable sampling and to be the only source for aggregate recall metrics and histograms | UR-102, UR-103, UR-104, UR-105, UR-106 |
+| CM-INDEXER-054 | Add | Permit optional user-query TNN-Recall as a diagnostic-only mode that reports exact-versus-approximate neighbors and remains separated from automated quality evaluation | UR-107, UR-108, UR-109, UR-110, UR-111 |
+| CM-INDEXER-055 | Revise | Extend corpus-based rooted TNN-Recall so the approximate-neighbor path exposes configurable traversal width for measurement sweeps without changing aggregate-mode ownership | UR-102, UR-113 |
 
 ## Before / After
 
@@ -421,6 +438,26 @@
 
 - **Before [KNOWN]:** The rooted quality requirements treated parent-versus-child centroid-distance spread as advisory per-pair findings, which can overstate problems when the parent is measured over summarized child representatives while the child is measured over its own members, and they did not yet define a fuller per-layer quality model for cohesion, separation, PCA-axis strength, quantile occupancy behavior, or split effectiveness.
 - **After [KNOWN]:** The rooted quality requirements now treat parent-versus-child spread inversions as aggregate heuristic counts only, not emitted warning findings, and require the report to include a refined per-layer quality model covering intra-block dispersion, sibling-centroid separation, PCA-axis strength, quantile-bin occupancy variance, and parent-to-child dispersion deltas, with repository-defined default quantile bins in this increment.
+
+### BA-INDEXER-052
+
+- **Before [KNOWN]:** The rooted quality requirements did not yet require any nearest-neighbor retrieval-quality diagnostic, so operators had no repository-owned Recall@k signal for how well a rooted tree preserved exact-neighbor retrieval.
+- **After [KNOWN]:** The rooted quality requirements now add rooted TNN-Recall at Recall@1, Recall@5, and Recall@10 as part of post-index quality assessment over the embeddings reachable from the caller-supplied root.
+
+### BA-INDEXER-053
+
+- **Before [KNOWN]:** Even if a recall diagnostic were added, the requirements did not constrain whether aggregate recall metrics would be computed from rooted-corpus samples, user-supplied debug queries, or a non-reproducible sampling method.
+- **After [KNOWN]:** The requirements now define corpus-based TNN-Recall as the default and only aggregate-evaluation mode, with uniform rooted-corpus sampling, configurable sample size, and seed-based reproducibility for mean recall, recall standard deviation, and recall histograms.
+
+### BA-INDEXER-054
+
+- **Before [KNOWN]:** The requirements did not distinguish between a statistical recall metric computed over the rooted corpus and a one-off user-supplied query used to debug approximate-neighbor behavior.
+- **After [KNOWN]:** The requirements now separate corpus-based recall from optional user-query diagnostic recall, require user-query output to show exact and approximate neighbors for comparison, and explicitly exclude diagnostic recall from aggregate quality metrics.
+
+### BA-INDEXER-055
+
+- **Before [KNOWN]:** The rooted TNN-recall requirements defined seeded corpus sampling and aggregate-mode ownership but did not specify whether approximate-neighbor traversal width could be tuned for measurement.
+- **After [KNOWN]:** The rooted TNN-recall requirements now require configurable traversal width for corpus-based evaluation so operators can measure recall across different approximate-search widths while preserving the rooted-corpus aggregate boundary.
 
 ## Requirements
 
@@ -876,8 +913,8 @@ reconstructable to an operator.
 
 LexonArchiveBuilder SHALL provide a rooted block-tree quality assessment tool
 that reads a caller-selected root block from the configured block store and
-reports structural-correctness and embedding-space quality findings for the
-reachable tree.
+reports structural-correctness, embedding-space quality findings, and rooted
+TNN-recall diagnostics for the reachable tree.
 
 - **Invocation scope [KNOWN]:** The assessment takes a configured block store and
   a caller-supplied root block identifier, then traverses the reachable block
@@ -915,6 +952,9 @@ reachable tree.
 - **Output requirement [KNOWN]:** The assessment must emit a human-readable
   summary and a machine-readable JSON artifact for the same analyzed rooted
   tree.
+- **TNN-recall extensibility [KNOWN]:** The assessment must support rooted
+  TNN-recall diagnostics over the embedding corpus reachable from the supplied
+  root without redefining the repository's search-serving surfaces.
 - **Environment parity [INFERRED]:** The same assessment contract must remain
   usable against local/testing and preserved production-shaped block stores
   through the shared `BlockStore` boundary.
@@ -924,7 +964,74 @@ reachable tree.
 - **Boundary [INFERRED]:** This requirement adds post-index assessment only; it
   does not redefine LexonGraph block validity semantics, change indexing-time
   construction behavior, or alter MCP search-serving behavior.
-- **Traceability:** UR-80, UR-81, UR-82, UR-83, UR-84, UR-85, UR-86, UR-87
+- **Traceability:** UR-80, UR-81, UR-82, UR-83, UR-84, UR-85, UR-86, UR-87, UR-101, UR-102, UR-111, UR-112
+
+#### RQ-INDEXER-008D1 - Corpus-based rooted TNN-recall
+
+LexonArchiveBuilder SHALL support True Nearest Neighbor Recall evaluation over
+the embedding corpus reachable from the caller-supplied root block by sampling
+query embeddings from that rooted corpus and computing Recall@1, Recall@5, and
+Recall@10.
+
+- **Aggregate-quality default [KNOWN]:** Corpus-based TNN-Recall is the default
+  recall-evaluation mode and SHALL be the only mode used for automated or
+  aggregate quality evaluation in this increment.
+- **Rooted corpus scope [KNOWN]:** For this CLI tool, the evaluated corpus is
+  the embedding set reachable from the supplied root rather than every
+  embedding visible in the configured block store.
+- **Sampling discipline [KNOWN]:** Sampled query embeddings SHALL be selected
+  uniformly over the rooted embedding set.
+- **Reproducibility [KNOWN]:** Corpus-based sampling SHALL be reproducible for a
+  given seed.
+- **Sample-size control [KNOWN]:** The number of sampled query embeddings SHALL
+  be configurable.
+- **Traversal-width control [KNOWN]:** The approximate-neighbor retrieval path
+  used for corpus-based TNN-recall SHALL expose configurable traversal width so
+  operators can measure recall at different widths.
+- **Aggregate outputs [KNOWN]:** Mean recall, recall standard deviation, and
+  recall histograms SHALL be computed from this corpus-based mode.
+- **Metric family [KNOWN]:** The required recall outputs for this increment are
+  Recall@1, Recall@5, and Recall@10.
+- **Boundary [INFERRED]:** This requirement adds post-index rooted quality
+  evidence only; it does not redefine LexonGraph search semantics or create an
+  MCP-visible recall surface.
+- **Traceability:** UR-101, UR-102, UR-103, UR-104, UR-105, UR-106, UR-112, UR-113
+
+#### RQ-INDEXER-008D2 - User-query diagnostic recall
+
+LexonArchiveBuilder MAY support TNN-Recall evaluation for one or more
+user-supplied query embeddings as a diagnostic-only operator aid over the same
+rooted tree.
+
+- **Metric family [KNOWN]:** When this optional mode is supported, it SHALL
+  compute Recall@1, Recall@5, and Recall@10 for each supplied query embedding.
+- **Comparison evidence [KNOWN]:** The diagnostic output SHALL report the exact
+  neighbors and the approximate neighbors for comparison.
+- **Labeling [KNOWN]:** This output SHALL be labeled as `diagnostic recall`.
+- **Non-aggregate boundary [KNOWN]:** User-query diagnostic recall SHALL NOT
+  contribute to mean recall, recall standard deviation, recall histograms, or
+  any other aggregate quality metric.
+- **Debugging intent [KNOWN]:** This mode is a debugging aid only and does not
+  redefine the statistical quality-evaluation contract for rooted trees.
+- **Traceability:** UR-107, UR-108, UR-109, UR-110, UR-111
+
+#### RQ-INDEXER-008D3 - TNN-recall mode separation
+
+LexonArchiveBuilder SHALL clearly distinguish corpus-based rooted recall from
+user-query diagnostic recall in both the human-readable summary and the
+machine-readable report for the rooted quality tool.
+
+- **Mode semantics [KNOWN]:** Corpus-based recall is the repository-owned
+  statistical quality metric; user-query recall is a debugging aid.
+- **Automated-evaluation boundary [KNOWN]:** Corpus-based recall SHALL remain
+  the only mode used for automated quality evaluation.
+- **Contract clarity [INFERRED]:** Reported recall artifacts must identify the
+  query source so operators cannot mistake one-off diagnostic recall for
+  aggregate rooted-corpus quality evidence.
+- **Surface boundary [INFERRED]:** This distinction is local to the CLI quality
+  tool and does not alter the existing MCP search contract or the separate
+  rooted CLI text-search tool.
+- **Traceability:** UR-102, UR-106, UR-107, UR-110, UR-111
 
 #### RQ-INDEXER-008E - Rooted CLI search over stored trees
 
@@ -1014,6 +1121,7 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 - Requiring detailed clustering-input inventories for successful clustering runs in this increment
 - Requiring the block-tree quality assessment tool to expose an MCP-visible interface in this increment
 - Reinterpreting advisory embedding-space quality heuristics as new LexonGraph-owned block-validity rules in this increment
+- Allowing user-query diagnostic recall to contribute to automated or aggregate rooted-quality metrics
 - Requiring the rooted CLI search tool to replace or redefine the existing MCP search surface in this increment
 - Defining a repository-local search algorithm or a second repository-local search corpus model instead of using `lexongraph-search` over the approved rooted-tree boundary
 
@@ -1034,6 +1142,7 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 | Latest upstream telemetry remains subordinate to the existing runtime progress surface | Preserved with clarified scope | Requirements now constrain richer live telemetry and heartbeat events to the same repository-owned log stream rather than a new telemetry interface |
 | Operator-visible progress counts remain understandable across upstream telemetry changes | Preserved with clarified scope | Requirements now distinguish invocation-total delegated-item counts from stage-local or layer-local telemetry counts so upstream count-shape changes do not create misleading logs |
 | Post-index quality assessment remains subordinate to existing storage and serving boundaries | Preserved with clarified scope | The new assessment is constrained to a CLI-only operator tool that reads through the shared `BlockStore` boundary and does not alter MCP-facing behavior |
+| Aggregate recall evaluation remains rooted-corpus-based and reproducible | Preserved with clarified scope | TNN-Recall is constrained to uniform seeded sampling over the rooted reachable embedding set for aggregate metrics, while user-query recall remains diagnostic-only |
 | Operator CLI search remains additive to MCP search-serving behavior | Preserved with clarified scope | The new rooted CLI search tool is additive, uses the approved rooted-tree boundary plus `lexongraph-search`, and does not replace the MCP surface |
 | Clients are not forced to parse raw mailbox blobs for ordinary retrieval | Preserved | Indexed chunks must reference normalized email artifacts so retrieval can stay at chunk level or expand to full normalized email through repository-owned artifacts |
 | Storage abstraction count stays bounded across environments | Preserved | Requirements now reuse the environment-selected `BlockStore` abstraction family for indexed blocks, normalized email artifacts, and mailbox provenance artifacts rather than introducing a second storage stack |
@@ -1050,6 +1159,7 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 - **Q-INDEXER-066 [UNKNOWN]:** Future increments may revisit whether any rooted-quality heuristics beyond hard structural violations should influence process exit status, but this increment keeps the heuristic inversion count and layer statistics advisory-only.
 - **Q-INDEXER-067 [UNKNOWN]:** Beyond the required query text, embedding endpoint, root, and `k`, does the rooted CLI search tool need repository-approved filters, score thresholds, or output-field selection in this increment?
 - **Q-INDEXER-068 [UNKNOWN]:** Should the rooted CLI search tool treat the caller-supplied embedding endpoint as the complete query-embedding configuration, or must it also accept repository-specific embedding-spec inputs such as dimensions or encoding overrides at the CLI boundary?
+- **Q-INDEXER-069 [UNKNOWN]:** For corpus-based TNN-recall histograms, should a future increment keep repository-owned default histogram buckets or expose bucket configuration as an operator-visible parameter?
 
 ## Coverage Notes
 
@@ -1122,6 +1232,8 @@ This metric SHALL be used to detect multimodal blocks and ineffective splits."
   - user clarification in this session selecting: "Yes — explicit cluster_count overrides; auto-size only when omitted (Recommended)"
   - user request in this session: "ok, can we pull latest lexongraph again? It has new telemtry"
   - user clarification in this session selecting: "Project the new upstream telemetry onto the existing runtime progress/log surface (Recommended)"
+  - user request in this session: "adding a new diagnostic TNN-Recall (1, 5 and 10 key versions). TNN‑Recall Query Source Requirements 1. Corpus‑Based Evaluation (Required) The system SHALL support True Nearest Neighbor Recall evaluation using randomly sampled embeddings from the corpus. This mode SHALL be the default and SHALL be used for all aggregate recall metrics. - Sampling MUST be uniform over the embedding set. - Sampling MUST be reproducible given a seed. - Sample size MUST be configurable. - This mode SHALL be used for Mean Recall, StdDev Recall, and Recall Histograms. 2. User‑Query Evaluation (Optional) The system MAY support TNN‑Recall evaluation using user‑supplied query embeddings. This mode SHALL be treated as a diagnostic tool only and SHALL NOT contribute to aggregate recall metrics. - The system SHALL compute Recall@k for the user query. - The system SHALL report the exact neighbors and approximate neighbors for comparison. - The system SHALL label this result as “diagnostic recall.” 3. Separation of Modes The system SHALL clearly distinguish between: - Corpus‑based recall (statistical quality metric) - User‑query recall (debugging aid) Corpus‑based recall SHALL be the only mode used for automated quality evaluation."
+  - user clarification in this session selecting: "Reachable embeddings under the supplied root (Recommended)"
   - `docs/specs/lexonarchivebuilder-indexer/design.md:228-315`
   - `docs/specs/lexonarchivebuilder-indexer/validation.md:72-187`
   - `crates/lexonarchivebuilder-indexer/src/runtime.rs:14-340`

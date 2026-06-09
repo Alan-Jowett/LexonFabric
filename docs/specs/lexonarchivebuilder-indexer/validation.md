@@ -8,9 +8,9 @@ streaming delegated indexing, stage-selectable execution, standalone
 clustering input discovery, clustering-algorithm selection, clustering-option
 exposure, latest planning-policy and telemetry compatibility, upstream
 regression assessment, replay-submission and streaming-status observability,
-clustering-failure diagnostics, rooted block-tree quality assessment,
-rooted CLI search over stored trees, replay-stable fingerprinting, and
-layer-parallel block-construction evolution in
+clustering-failure diagnostics, rooted block-tree quality assessment with
+rooted TNN-recall diagnostics, rooted CLI search over stored trees,
+replay-stable fingerprinting, and layer-parallel block-construction evolution in
 `docs/specs/lexonarchivebuilder-indexer/requirements.md` and
 `docs/specs/lexonarchivebuilder-indexer/design.md`.
 
@@ -25,9 +25,9 @@ exposure, latest planning-policy and telemetry compatibility, upstream
 regression assessment, embedding-phase batch-progress observability,
 replay-submission observability, streaming-status observability,
 telemetry-count-semantics clarity, clustering-failure diagnostics, rooted
-block-tree quality assessment, rooted CLI search over stored trees,
-replay-stable fingerprinting, and leaf-layer parallel block scheduling in the
-local/testing profile.
+block-tree quality assessment with rooted TNN-recall diagnostics, rooted CLI
+search over stored trees, replay-stable fingerprinting, and leaf-layer
+parallel block scheduling in the local/testing profile.
 
 This package validates LexonArchiveBuilder's batch contract, adapter selection, and
 delegated use of LexonGraph interfaces. It does not redefine validation already
@@ -217,9 +217,12 @@ that accepts a configured block-store boundary plus a caller-supplied root block
 identifier, does not require request-file batch execution or MCP exposure, and
 renders both an operator-readable summary and a machine-readable JSON report for
 the rooted analysis result without requiring an operator-visible quantile-bin
-configuration surface in this increment.
+configuration surface in this increment. When rooted TNN-recall is enabled, the
+same surface keeps corpus-based evaluation controls, including sample size,
+seed, and traversal width, distinct from optional diagnostic-query recall
+inputs.
 
-**Traces to:** RQ-INDEXER-008D, DSG-LFI-002D, DSG-LFI-005B, DSG-LFI-007D
+**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-008D1, RQ-INDEXER-008D2, RQ-INDEXER-008D3, DSG-LFI-002D, DSG-LFI-002D1, DSG-LFI-002D2, DSG-LFI-005B, DSG-LFI-007D
 
 ### VAL-LFI-002P
 
@@ -381,9 +384,40 @@ two times the expected value, and per-parent split-effectiveness statistics.
 The required parent-versus-child centroid-distance heuristic is represented as
 aggregate split-effectiveness evidence, including the percentage of children
 whose dispersion exceeds the parent's plus the mean and maximum increase,
-rather than as emitted per-pair warning findings.
+rather than as emitted per-pair warning findings. The same run computes
+corpus-based TNN-recall over the rooted reachable embedding set at Recall@1,
+Recall@5, and Recall@10 using uniform seeded sampling with configurable sample
+size and configurable traversal width, derives mean recall, recall standard
+deviation, and recall histograms from that corpus-based mode only, and records
+the selected traversal width in the emitted recall evidence.
 
-**Traces to:** RQ-INDEXER-005, RQ-INDEXER-008D, DSG-LFI-002D, DSG-LFI-005B
+**Traces to:** RQ-INDEXER-005, RQ-INDEXER-008D, RQ-INDEXER-008D1, DSG-LFI-002D, DSG-LFI-002D1, DSG-LFI-005B
+
+### VAL-LFI-005B1
+
+Run the rooted block-tree quality tool in optional user-query diagnostic recall
+mode against a representative stored tree and one or more supplied query
+embeddings.
+
+**Pass condition:** when this optional mode is implemented, the report labels
+the result as `diagnostic recall`, computes Recall@1, Recall@5, and Recall@10
+for each supplied query, emits exact and approximate neighbors for comparison,
+and excludes those results from aggregate recall statistics and histograms.
+
+**Traces to:** RQ-INDEXER-008D2, RQ-INDEXER-008D3, DSG-LFI-002D2, DSG-LFI-007D
+
+### VAL-LFI-005B2
+
+Run the rooted block-tree quality tool twice against the same representative
+stored tree with identical corpus-based TNN-recall sample and seed settings but
+different traversal-width values.
+
+**Pass condition:** the corpus-based TNN-recall path accepts each traversal
+width, preserves the rooted corpus and seeded sampling contract, and records
+the selected traversal width in the report so operators can compare measurement
+runs across widths without ambiguity.
+
+**Traces to:** RQ-INDEXER-008D1, DSG-LFI-002D1, DSG-LFI-007D
 
 ### VAL-LFI-005C
 
@@ -578,10 +612,11 @@ surface, does not redefine MCP retrieval or search behavior, and does not
 reinterpret advisory embedding-space quality heuristics as new upstream
 LexonGraph block-validity rules. The package also keeps quantile-bin selection
 behind a repository-defined default rather than introducing a new operator
-parameter surface in this increment.
+parameter surface in this increment. The package also keeps corpus-based recall
+as the only automated quality metric and preserves user-query recall as an
+optional diagnostic-only aid.
 
-**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-009, RQ-INDEXER-010A, DSG-LFI-002D,
-DSG-LFI-009, DSG-LFI-011
+**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-008D1, RQ-INDEXER-008D2, RQ-INDEXER-008D3, RQ-INDEXER-009, RQ-INDEXER-010A, DSG-LFI-002D, DSG-LFI-002D1, DSG-LFI-002D2, DSG-LFI-009, DSG-LFI-011
 
 ### VAL-LFI-009C
 

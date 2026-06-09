@@ -127,8 +127,9 @@ mod tests {
 
     #[test]
     fn parse_block_hash_rejects_invalid_hex() {
-        let error = parse_block_hash("zz").unwrap_err();
-        assert_eq!(error.value, "zz");
+        let invalid_hex = "zz".repeat(BlockHash::LEN);
+        let error = parse_block_hash(&invalid_hex).unwrap_err();
+        assert_eq!(error.value, invalid_hex);
     }
 
     #[test]

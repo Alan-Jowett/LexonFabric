@@ -64,7 +64,10 @@ enum Command {
         top_k: usize,
         #[arg(long, default_value_t = default_search_traversal_width())]
         traversal_width: usize,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Base URL for an OpenAI-compatible embedding service. A full /v1/embeddings URL is also accepted."
+        )]
         embedding_endpoint: String,
         #[arg(long, default_value = DEFAULT_LOCAL_MODEL)]
         embedding_model: String,
@@ -194,7 +197,7 @@ async fn main() -> anyhow::Result<()> {
                 ConfiguredEmbeddingProvider::from_environment(&EnvironmentConfig::Local {
                     block_store_root: PathBuf::from("."),
                     embedding: LocalEmbeddingConfig {
-                        base_url: embedding_endpoint,
+                        base_url: normalize_embedding_base_url(&embedding_endpoint),
                         model: embedding_model,
                         api_key_env: embedding_api_key_env,
                         request_timeout_secs: embedding_request_timeout_secs,
@@ -232,6 +235,14 @@ fn unused_local_embedding() -> LocalEmbeddingConfig {
         max_retries: DEFAULT_MAX_RETRIES,
         retry_delay_ms: DEFAULT_RETRY_DELAY_MS,
     }
+}
+
+fn normalize_embedding_base_url(endpoint: &str) -> String {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/v1/embeddings")
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -363,5 +374,21 @@ mod tests {
             }
             _ => panic!("expected search command"),
         }
+    }
+
+    #[test]
+    fn normalize_embedding_base_url_accepts_full_embeddings_path() {
+        assert_eq!(
+            normalize_embedding_base_url("http://localhost:8080/v1/embeddings"),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            normalize_embedding_base_url("http://localhost:8080/v1/embeddings/"),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            normalize_embedding_base_url("http://localhost:8080"),
+            "http://localhost:8080"
+        );
     }
 }

@@ -2661,9 +2661,30 @@ fn format_adaptive_planning_status(
             "adaptive boundary {boundary_position} reported a switch while remaining on directional-pca"
         ),
     };
+    let compared_values = format_adaptive_compared_values(decision);
     format!(
-        "; adaptive pass {}: {detail}",
-        adaptive_planning.pass_number
+        "; adaptive pass {}: {detail}{compared_values}",
+        adaptive_planning.pass_number,
+    )
+}
+
+fn format_adaptive_compared_values(
+    decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry,
+) -> String {
+    let (Some(mean_cluster_radius), Some(mean_cluster_radius_threshold)) = (
+        decision.mean_cluster_radius,
+        decision.mean_cluster_radius_threshold,
+    ) else {
+        return String::new();
+    };
+
+    let comparator = if decision.switch_boundary_occurred {
+        ">"
+    } else {
+        "<="
+    };
+    format!(
+        " (mean_cluster_radius={mean_cluster_radius:.6} {comparator} threshold={mean_cluster_radius_threshold:.6})"
     )
 }
 
@@ -4663,6 +4684,8 @@ mod tests {
                     boundary_position: 0,
                     active_algorithm: ActivePlanningAlgorithm::DirectionalPca,
                     switch_boundary_occurred: false,
+                    mean_cluster_radius: None,
+                    mean_cluster_radius_threshold: None,
                 },
             }),
         };
@@ -4692,13 +4715,15 @@ mod tests {
                     boundary_position: 4,
                     active_algorithm: ActivePlanningAlgorithm::Dcbc,
                     switch_boundary_occurred: true,
+                    mean_cluster_radius: Some(0.31),
+                    mean_cluster_radius_threshold: Some(0.25),
                 },
             }),
         };
 
         assert_eq!(
             format_indexing_status(status),
-            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 4 switched to dcbc"
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 4 switched to dcbc (mean_cluster_radius=0.310000 > threshold=0.250000)"
         );
     }
 
@@ -4721,6 +4746,8 @@ mod tests {
                     boundary_position: 5,
                     active_algorithm: ActivePlanningAlgorithm::Dcbc,
                     switch_boundary_occurred: false,
+                    mean_cluster_radius: None,
+                    mean_cluster_radius_threshold: None,
                 },
             }),
         };
@@ -4728,6 +4755,37 @@ mod tests {
         assert_eq!(
             format_indexing_status(status),
             "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 5 stayed on dcbc after an earlier switch"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_directional_pca_comparison_values() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 3,
+                    active_algorithm: ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                    mean_cluster_radius: Some(0.12),
+                    mean_cluster_radius_threshold: Some(0.25),
+                },
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: adaptive boundary 3 stayed on directional-pca (mean_cluster_radius=0.120000 <= threshold=0.250000)"
         );
     }
 

@@ -837,8 +837,13 @@ fn build_corpus_tnn_recall_report(
 ) -> Result<CorpusTnnRecallReport, TreeQualityError> {
     let traversal_width = config.traversal_width;
     let corpus_size = state.corpus_entries.len();
-    let effective_sample_size = config.sample_size.min(corpus_size);
-    if effective_sample_size == 0 || has_embedding_spec_mismatch(state) {
+    let can_compute_recall = corpus_size >= 2 && !has_embedding_spec_mismatch(state);
+    let effective_sample_size = if can_compute_recall {
+        config.sample_size.min(corpus_size)
+    } else {
+        0
+    };
+    if effective_sample_size == 0 {
         return Ok(zeroed_corpus_tnn_recall_report(
             corpus_size,
             config.sample_size,
@@ -1670,6 +1675,7 @@ mod tests {
                 .iter()
                 .any(|finding| finding.kind == FindingKind::EmbeddingSpecMismatch)
         );
+        assert_eq!(report.corpus_tnn_recall.effective_sample_size, 0);
         assert!(
             report
                 .corpus_tnn_recall
@@ -1711,6 +1717,7 @@ mod tests {
         let root = store.put(&leaf_block(0, &[1.0, 0.0])).unwrap();
 
         let report = assess_rooted_tree(&root, &store).unwrap();
+        assert_eq!(report.corpus_tnn_recall.effective_sample_size, 0);
         assert!(
             report
                 .corpus_tnn_recall

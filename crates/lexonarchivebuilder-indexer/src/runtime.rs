@@ -12,12 +12,12 @@ use lexongraph_block::{
 use lexongraph_block_store::{BlockStore, BlockStoreError};
 use lexongraph_embeddings_trait::{EmbeddingInput, EmbeddingProvider};
 use lexongraph_streaming_indexer::{
-    AdaptiveDcbcSettings, AdaptivePlanningDirection, AdaptivePlanningSettings,
-    AdaptiveSwitchCriteria, ArithmeticMeanCanonicalEmbeddingPolicy, BuiltInPlanning,
-    BuiltInPlanningDirection, ContentResolver, DcbcBuiltInPlanningSettings,
-    DcbcStreamingClusteringFactory, DirectionalPcaBuiltInPlanningSettings,
-    HierarchicalPlanningPolicy, IndexItem, PlanningStage, StreamingIndexerError,
-    StreamingIndexingPhase, StreamingIndexingRun, StreamingIndexingStatus,
+    ActivePlanningAlgorithm, AdaptiveDcbcSettings, AdaptivePlanningDirection,
+    AdaptivePlanningSettings, AdaptivePlanningStatusTelemetry, AdaptiveSwitchCriteria,
+    ArithmeticMeanCanonicalEmbeddingPolicy, BuiltInPlanning, BuiltInPlanningDirection,
+    ContentResolver, DcbcBuiltInPlanningSettings, DcbcStreamingClusteringFactory,
+    DirectionalPcaBuiltInPlanningSettings, HierarchicalPlanningPolicy, IndexItem, PlanningStage,
+    StreamingIndexerError, StreamingIndexingPhase, StreamingIndexingRun, StreamingIndexingStatus,
     StreamingIndexingStatusObserver, StreamingIndexingStatusState,
 };
 use serde::Serialize;
@@ -2439,8 +2439,9 @@ fn format_completed_of_total(
 }
 
 fn format_indexing_status(status: StreamingIndexingStatus) -> String {
+    let adaptive_suffix = format_adaptive_planning_status(status.adaptive_planning);
     let elapsed_ms = status.elapsed.as_millis();
-    match (status.phase, status.state) {
+    let message = match (status.phase, status.state) {
         (
             StreamingIndexingPhase::PlanningPass { pass_number },
             StreamingIndexingStatusState::Started,
@@ -2628,7 +2629,42 @@ fn format_indexing_status(status: StreamingIndexingStatus) -> String {
                 status.error.unwrap_or_else(|| "unknown error".into())
             ),
         },
-    }
+    };
+    format!("{message}{adaptive_suffix}")
+}
+
+fn format_adaptive_planning_status(
+    adaptive_planning: Option<AdaptivePlanningStatusTelemetry>,
+) -> String {
+    let Some(adaptive_planning) = adaptive_planning else {
+        return String::new();
+    };
+    let decision = adaptive_planning.decision;
+    let detail = match (
+        decision.active_algorithm,
+        decision.switch_boundary_occurred,
+        decision.boundary_position,
+    ) {
+        (ActivePlanningAlgorithm::DirectionalPca, false, 0) => {
+            "initial adaptive boundary used directional-pca".to_string()
+        }
+        (ActivePlanningAlgorithm::DirectionalPca, false, boundary_position) => {
+            format!("adaptive boundary {boundary_position} stayed on directional-pca")
+        }
+        (ActivePlanningAlgorithm::Dcbc, true, boundary_position) => {
+            format!("adaptive boundary {boundary_position} switched to dcbc")
+        }
+        (ActivePlanningAlgorithm::Dcbc, false, boundary_position) => {
+            format!("adaptive boundary {boundary_position} stayed on dcbc after an earlier switch")
+        }
+        (ActivePlanningAlgorithm::DirectionalPca, true, boundary_position) => format!(
+            "adaptive boundary {boundary_position} reported a switch while remaining on directional-pca"
+        ),
+    };
+    format!(
+        "; adaptive pass {}: {detail}",
+        adaptive_planning.pass_number
+    )
 }
 
 fn report_progress(progress: &ProgressReporter, message: String) {
@@ -4605,6 +4641,93 @@ mod tests {
         assert_eq!(
             format_indexing_status(status),
             "custom planning still running after 125 ms; processed 7 stage-local item(s)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_initial_adaptive_boundary() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 0,
+                    active_algorithm: ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                },
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: initial adaptive boundary used directional-pca"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_adaptive_switch_to_dcbc() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 2,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 4,
+                    active_algorithm: ActivePlanningAlgorithm::Dcbc,
+                    switch_boundary_occurred: true,
+                },
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 4 switched to dcbc"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_dcbc_after_earlier_switch() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 2,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 5,
+                    active_algorithm: ActivePlanningAlgorithm::Dcbc,
+                    switch_boundary_occurred: false,
+                },
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 5 stayed on dcbc after an earlier switch"
         );
     }
 

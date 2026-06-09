@@ -912,22 +912,13 @@ fn quantile_occupancy_metrics(
     principal_axis: &[f32],
 ) -> QuantileOccupancyMetrics {
     let sample_count = centered.len();
-    let bin_count = sample_count.clamp(1, DEFAULT_QUANTILE_BIN_COUNT);
+    let bin_count = DEFAULT_QUANTILE_BIN_COUNT;
     if sample_count == 0 {
         return QuantileOccupancyMetrics {
             bin_count,
             occupancies: vec![0; bin_count],
             occupancy_variance: 0.0,
             empty_bin_count: bin_count,
-            overfull_bin_count: 0,
-        };
-    }
-    if bin_count == 1 || l2_norm(principal_axis) <= EPSILON {
-        return QuantileOccupancyMetrics {
-            bin_count: 1,
-            occupancies: vec![sample_count],
-            occupancy_variance: 0.0,
-            empty_bin_count: 0,
             overfull_bin_count: 0,
         };
     }
@@ -1149,6 +1140,16 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn quantile_occupancy_keeps_default_bin_count_for_degenerate_axis() {
+        let metrics = quantile_occupancy_metrics(&[vec![0.0, 0.0], vec![0.0, 0.0]], &[0.0, 0.0]);
+
+        assert_eq!(metrics.bin_count, DEFAULT_QUANTILE_BIN_COUNT);
+        assert_eq!(metrics.occupancies, vec![2, 0, 0, 0]);
+        assert_eq!(metrics.empty_bin_count, 3);
+        assert_eq!(metrics.overfull_bin_count, 1);
     }
 
     fn branch_block(level: u64, entries: Vec<([f32; 2], BlockHash)>) -> Block {

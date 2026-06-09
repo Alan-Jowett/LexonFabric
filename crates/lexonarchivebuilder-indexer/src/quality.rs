@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use half::f16;
 use lexongraph_block::{Block, BlockHash, BranchEntry, EmbeddingSpec, LeafBlock, LeafEntry};
 use lexongraph_block_store::{BlockStore, BlockStoreError};
 use lexongraph_search::{
@@ -235,6 +236,7 @@ struct TraversalState {
     metrics_by_id: HashMap<BlockHash, BlockQualityMetrics>,
     child_ids_by_parent: HashMap<BlockHash, Vec<BlockHash>>,
     visited: HashSet<BlockHash>,
+    has_zero_magnitude_tnn_entry: bool,
     structural_finding_count: usize,
     edge_count: usize,
     max_depth: usize,
@@ -251,7 +253,6 @@ struct BlockComputedMetrics {
 struct CorpusLeafEntry {
     neighbor_id: String,
     leaf_block_id: BlockHash,
-    embedding_bytes: Vec<u8>,
     embedding: Vec<f32>,
 }
 
@@ -327,6 +328,7 @@ pub fn assess_rooted_tree_with_config(
         metrics_by_id: HashMap::new(),
         child_ids_by_parent: HashMap::new(),
         visited: HashSet::new(),
+        has_zero_magnitude_tnn_entry: false,
         structural_finding_count: 0,
         edge_count: 0,
         max_depth: 0,
@@ -837,7 +839,9 @@ fn build_corpus_tnn_recall_report(
 ) -> Result<CorpusTnnRecallReport, TreeQualityError> {
     let traversal_width = config.traversal_width;
     let corpus_size = state.corpus_entries.len();
-    let can_compute_recall = corpus_size >= 2 && !has_embedding_spec_mismatch(state);
+    let can_compute_recall = corpus_size >= 2
+        && !has_embedding_spec_mismatch(state)
+        && !state.has_zero_magnitude_tnn_entry;
     let effective_sample_size = if can_compute_recall {
         config.sample_size.min(corpus_size)
     } else {
@@ -1049,8 +1053,10 @@ fn approximate_neighbors(
     if max_k == 0 {
         return Ok(Vec::new());
     }
-    let target =
-        EncodedTargetEmbedding::new(query.embedding_bytes.clone(), root_embedding_spec.clone());
+    let target = EncodedTargetEmbedding::new(
+        encode_embedding_values(&query.embedding, root_embedding_spec, &query.leaf_block_id)?,
+        root_embedding_spec.clone(),
+    );
     let result = search_with_partial_retry(
         searcher,
         root_id,
@@ -1080,11 +1086,13 @@ fn collect_corpus_entries(
     state: &mut TraversalState,
 ) -> Result<(), TreeQualityError> {
     for entry in &leaf.entries {
-        state.corpus_entries.push(corpus_entry_from_leaf_result(
-            block_id,
-            entry,
-            &leaf.embedding_spec,
-        )?);
+        match corpus_entry_from_leaf_result(block_id, entry, &leaf.embedding_spec) {
+            Ok(entry) => state.corpus_entries.push(entry),
+            Err(TreeQualityError::ZeroMagnitudeEmbedding { .. }) => {
+                state.has_zero_magnitude_tnn_entry = true;
+            }
+            Err(other) => return Err(other),
+        }
     }
     Ok(())
 }
@@ -1129,9 +1137,47 @@ fn corpus_entry_from_leaf_result(
     Ok(CorpusLeafEntry {
         neighbor_id: corpus_neighbor_id(leaf_block_id, entry),
         leaf_block_id,
-        embedding_bytes: entry.embedding.clone(),
         embedding,
     })
+}
+
+fn encode_embedding_values(
+    embedding: &[f32],
+    embedding_spec: &EmbeddingSpec,
+    block_id: &BlockHash,
+) -> Result<Vec<u8>, TreeQualityError> {
+    let expected_dims = usize::try_from(embedding_spec.dims).map_err(|_| {
+        TreeQualityError::UnsupportedEmbeddingSpec {
+            block_id: block_id.to_string(),
+            encoding: embedding_spec.encoding.clone(),
+            dims: embedding_spec.dims,
+        }
+    })?;
+    if embedding.len() != expected_dims {
+        return Err(TreeQualityError::InvalidEmbeddingLength {
+            block_id: block_id.to_string(),
+            encoding: embedding_spec.encoding.clone(),
+            dims: embedding_spec.dims,
+            expected_bytes: expected_embedding_byte_len(embedding_spec).unwrap_or_default(),
+            actual_bytes: std::mem::size_of_val(embedding),
+        });
+    }
+
+    match embedding_spec.encoding.as_str() {
+        "f32le" => Ok(embedding
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()),
+        "f16le" => Ok(embedding
+            .iter()
+            .flat_map(|value| f16::from_f32(*value).to_le_bytes())
+            .collect()),
+        _ => Err(TreeQualityError::UnsupportedEmbeddingSpec {
+            block_id: block_id.to_string(),
+            encoding: embedding_spec.encoding.clone(),
+            dims: embedding_spec.dims,
+        }),
+    }
 }
 
 fn corpus_neighbor_id(leaf_block_id: BlockHash, entry: &LeafEntry) -> String {
@@ -1675,6 +1721,45 @@ mod tests {
                 .iter()
                 .any(|finding| finding.kind == FindingKind::EmbeddingSpecMismatch)
         );
+        assert_eq!(report.corpus_tnn_recall.effective_sample_size, 0);
+        assert!(
+            report
+                .corpus_tnn_recall
+                .recall_at
+                .iter()
+                .all(|metric| metric.mean_recall == 0.0
+                    && metric.stdev_recall == 0.0
+                    && metric.histogram.is_empty())
+        );
+    }
+
+    #[test]
+    fn assessment_zeroes_tnn_recall_when_rooted_corpus_contains_zero_magnitude_entry() {
+        let dir = tempdir().unwrap();
+        let store = FilesystemBlockStore::new(dir.path().join("blocks")).unwrap();
+
+        let alpha = store.put(&named_leaf_block("alpha", &[1.0, 0.0])).unwrap();
+        let beta = store.put(&named_leaf_block("beta", &[0.0, 1.0])).unwrap();
+        let zero = store.put(&named_leaf_block("zero", &[0.0, 0.0])).unwrap();
+        let root = store
+            .put(&branch_block(
+                1,
+                vec![([1.0, 0.0], alpha), ([0.0, 1.0], beta), ([0.0, 0.0], zero)],
+            ))
+            .unwrap();
+
+        let report = assess_rooted_tree_with_config(
+            &root,
+            &store,
+            TnnRecallConfig {
+                sample_size: 3,
+                seed: 7,
+                traversal_width: 3,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.corpus_tnn_recall.corpus_size, 2);
         assert_eq!(report.corpus_tnn_recall.effective_sample_size, 0);
         assert!(
             report

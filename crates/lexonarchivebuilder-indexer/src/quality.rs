@@ -864,7 +864,7 @@ fn build_corpus_tnn_recall_report(
         .copied()
         .max()
         .unwrap_or(1)
-        .min(corpus_size);
+        .min(corpus_size.saturating_sub(1));
     let searcher = Searcher::new(DefaultEmbeddingCompatibility, DefaultCandidateScorer);
     let mut recalls_by_k = REQUIRED_RECALL_AT
         .into_iter()
@@ -882,13 +882,13 @@ fn build_corpus_tnn_recall_report(
             store,
             &searcher,
         )?;
-        let approximate_ids = approximate_neighbors
-            .into_iter()
-            .map(|entry| entry.neighbor_id)
-            .collect::<HashSet<_>>();
-
         for &k in &REQUIRED_RECALL_AT {
             let denominator = exact_neighbors.len().min(k);
+            let approximate_ids = approximate_neighbors
+                .iter()
+                .take(k)
+                .map(|entry| entry.neighbor_id.clone())
+                .collect::<HashSet<_>>();
             let matched = exact_neighbors
                 .iter()
                 .take(k)
@@ -910,17 +910,21 @@ fn build_corpus_tnn_recall_report(
             .into_iter()
             .map(|k| {
                 let counts = recalls_by_k.remove(&k).unwrap_or_default();
-                tnn_recall_metrics(k, k.min(corpus_size), &counts)
+                tnn_recall_metrics(k, k.min(corpus_size.saturating_sub(1)), &counts)
             })
             .collect(),
     })
 }
 
 fn tnn_recall_metrics(k: usize, denominator: usize, counts: &[usize]) -> TnnRecallAtMetrics {
-    let recalls = counts
-        .iter()
-        .map(|count| *count as f32 / denominator as f32)
-        .collect::<Vec<_>>();
+    let recalls = if denominator == 0 {
+        vec![0.0; counts.len()]
+    } else {
+        counts
+            .iter()
+            .map(|count| *count as f32 / denominator as f32)
+            .collect::<Vec<_>>()
+    };
     let mut histogram_counts = BTreeMap::<usize, usize>::new();
     for count in counts {
         *histogram_counts.entry(*count).or_default() += 1;
@@ -934,7 +938,11 @@ fn tnn_recall_metrics(k: usize, denominator: usize, counts: &[usize]) -> TnnReca
             .map(
                 |(matched_neighbor_count, sample_count)| TnnRecallHistogramBin {
                     matched_neighbor_count,
-                    recall: matched_neighbor_count as f32 / denominator as f32,
+                    recall: if denominator == 0 {
+                        0.0
+                    } else {
+                        matched_neighbor_count as f32 / denominator as f32
+                    },
                     sample_count,
                 },
             )
@@ -976,6 +984,7 @@ fn exact_neighbors<'a>(
 ) -> Result<Vec<&'a CorpusLeafEntry>, TreeQualityError> {
     let mut ranked = corpus_entries
         .iter()
+        .filter(|entry| entry.neighbor_id != query.neighbor_id)
         .map(|entry| {
             cosine_similarity(&query.embedding, &entry.embedding).map(|score| (score, entry))
         })
@@ -1009,17 +1018,31 @@ fn approximate_neighbors(
     store: &dyn BlockStore,
     searcher: &Searcher<DefaultEmbeddingCompatibility, DefaultCandidateScorer>,
 ) -> Result<Vec<CorpusLeafEntry>, TreeQualityError> {
+    if max_k == 0 {
+        return Ok(Vec::new());
+    }
     let target =
         EncodedTargetEmbedding::new(query.embedding_bytes.clone(), root_embedding_spec.clone());
-    let result =
-        search_with_partial_retry(searcher, root_id, &target, traversal_width, max_k, store)
-            .map_err(TreeQualityError::from_search_error)?;
+    let result = search_with_partial_retry(
+        searcher,
+        root_id,
+        &target,
+        traversal_width,
+        max_k.saturating_add(1),
+        store,
+    )
+    .map_err(TreeQualityError::from_search_error)?;
     result
         .leaves
         .into_iter()
         .map(|leaf| {
             corpus_entry_from_leaf_result(leaf.leaf_block_id, &leaf.entry, root_embedding_spec)
         })
+        .filter(|entry| match entry {
+            Ok(entry) => entry.neighbor_id != query.neighbor_id,
+            Err(_) => true,
+        })
+        .take(max_k)
         .collect()
 }
 
@@ -1584,7 +1607,7 @@ mod tests {
             assert_eq!(metric.stdev_recall, 0.0);
             assert_eq!(metric.histogram.len(), 1);
             assert_eq!(metric.histogram[0].sample_count, 2);
-            assert_eq!(metric.histogram[0].matched_neighbor_count, metric.k.min(2));
+            assert_eq!(metric.histogram[0].matched_neighbor_count, 1);
             assert_eq!(metric.histogram[0].recall, 1.0);
         }
     }
@@ -1619,6 +1642,13 @@ mod tests {
         let root = store.put(&leaf_block(0, &[1.0, 0.0])).unwrap();
 
         let report = assess_rooted_tree(&root, &store).unwrap();
+        assert!(
+            report
+                .corpus_tnn_recall
+                .recall_at
+                .iter()
+                .all(|metric| metric.mean_recall == 0.0 && metric.stdev_recall == 0.0)
+        );
         let path = dir.path().join("report.json");
         write_report(&path, &report).unwrap();
 

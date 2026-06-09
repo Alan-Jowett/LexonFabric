@@ -5,8 +5,8 @@
 Validation patch for the approved email-artifact, chunk-level
 indexing, local filesystem block-store interoperability, replay-based
 streaming delegated indexing, stage-selectable execution, standalone
-clustering input discovery, clustering-mode and clustering-algorithm
-selection, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream
+clustering input discovery, clustering-provider plus clustering-mode and clustering-algorithm
+selection, adaptive built-in planning exposure, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream
 regression assessment, replay-submission and streaming-status observability,
 clustering-failure diagnostics, rooted block-tree quality assessment with
 rooted TNN-recall diagnostics, rooted CLI search over stored trees,
@@ -20,7 +20,7 @@ These validation entries define the expected conformance surface for the
 LexonArchiveBuilder-owned indexer boundary, including local filesystem
 block-store interoperability, replay-based streaming delegated indexing,
 stage-selectable execution, standalone clustering input discovery, explicit
-delegated clustering-mode and clustering-algorithm selection, algorithm-specific clustering-option
+delegated clustering-provider plus clustering-mode and clustering-algorithm selection, adaptive built-in planning exposure, algorithm-specific clustering-option
 exposure, latest planning-policy and telemetry compatibility, upstream
 regression assessment, embedding-phase batch-progress observability,
 replay-submission observability, streaming-status observability,
@@ -155,29 +155,33 @@ both executions remain contract-equivalent at the LexonArchiveBuilder boundary.
 Inspect the clustering-enabled CLI surface for a representative `run`
 invocation.
 
-**Pass condition:** the CLI exposes one explicit clustering-mode selector with
-aggregation as the omitted-value default and divisive as an explicit opt-in,
-exposes one explicit clustering-algorithm selector, accepts the supported
-shared clustering options plus the approved algorithm-specific option families,
-rejects option values that do not belong to the selected mode or selected
-algorithm instead of silently ignoring them, and preserves the existing
-request-file-driven runtime shape.
+**Pass condition:** the CLI exposes one explicit clustering-provider selector
+with the adapter clustering planner as the omitted-value default, one explicit
+clustering-mode selector with aggregation as the omitted-value default and
+divisive as an explicit opt-in, one explicit clustering-algorithm selector,
+accepts the supported shared clustering options plus the approved algorithm-
+specific option families, including the adaptive switch-criteria family and the
+adaptive directional-PCA/DCBC branch-specific option families when
+`adaptive` is selected, rejects option values that do not belong to the
+selected provider, selected mode, or selected algorithm instead of silently
+ignoring them, and preserves the existing request-file-driven runtime shape.
 
 **Traces to:** RQ-INDEXER-003F, RQ-INDEXER-003G, DSG-LFI-001G,
 DSG-LFI-001H, DSG-LFI-007C
 
 ### VAL-LFI-002L
 
-Run clustering-enabled execution for each supported built-in clustering
-algorithm under each supported clustering mode-and-algorithm combination once
-with omitted `cluster_count` and once with the equivalent explicit derived
-`cluster_count`.
+Run clustering-enabled execution for each supported delegated clustering
+provider, fixed built-in clustering algorithm, and supported provider-and-mode-
+and-algorithm combination that uses the repository's omitted `cluster_count`
+auto-sizing rule once with omitted `cluster_count` and once with the
+equivalent explicit derived `cluster_count`.
 
-**Pass condition:** for every supported delegated clustering mode-and-algorithm
-combination, LexonArchiveBuilder resolves the omitted-option invocation to the
-same effective delegated clustering configuration as the corresponding explicit
-derived-count invocation, so omitted `cluster_count` remains deterministic and
-does not create hidden replay drift.
+**Pass condition:** for every supported delegated clustering provider, mode,
+and algorithm combination, LexonArchiveBuilder resolves the omitted-option
+invocation to the same effective delegated clustering configuration as the
+corresponding explicit derived-count invocation, so omitted `cluster_count`
+remains deterministic and does not create hidden replay drift.
 
 **Traces to:** RQ-INDEXER-003F, RQ-INDEXER-003G, RQ-INDEXER-003H,
 RQ-INDEXER-008, DSG-LFI-001G, DSG-LFI-001H, DSG-LFI-010
@@ -201,9 +205,11 @@ Inspect the latest LexonGraph upgrade boundary against the repository-required
 indexer contract.
 
 **Pass condition:** the upgrade preserves the approved external stage contract,
-explicit aggregation-default clustering-mode selection with divisive opt-in,
-explicit `dcbc` and `directional-pca` selection where supported by the chosen
-mode, omitted `cluster_count` auto-sizing semantics, deterministic split-stage
+explicit adapter clustering planner default selection, explicit aggregation-
+default clustering-mode selection with divisive opt-in, explicit `dcbc`,
+`directional-pca`, and `adaptive` selection where supported by the chosen
+provider and mode,
+omitted `cluster_count` auto-sizing semantics, deterministic split-stage
 replay, repository-owned progress projection, projection of the latest upstream
 live telemetry and heartbeat events, and unchanged MCP search-serving behavior
 for already-indexed content, or else any missing capability is classified

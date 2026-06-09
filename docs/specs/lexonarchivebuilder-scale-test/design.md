@@ -3,7 +3,7 @@
 ## Status
 
 Phase 2 specification patch for the approved local rsync-driven stress-test
-wrapper with caller-selectable delegated clustering mode and configuration in
+wrapper with caller-selectable delegated clustering provider, mode, algorithm, and adaptive-option configuration in
 `docs/specs/lexonarchivebuilder-scale-test/requirements.md`.
 
 ## Scope
@@ -12,8 +12,9 @@ This document specifies the LexonArchiveBuilder-owned design for realizing
 `lexonarchivebuilder-scale-test` as a lightweight local wrapper that fetches
 mailbox archives from rsync, discovers `.mail` and `.mbox` mailbox inputs,
 generates an indexer-compatible request/config artifact, derives one explicit
-delegated clustering-mode and clustering configuration from caller-selected
-wrapper inputs when needed, and delegates block-tree generation to existing
+delegated clustering-provider plus clustering-mode and clustering configuration from caller-selected
+wrapper inputs when needed, including adaptive algorithm and adaptive-option
+selection when supported by the downstream indexer, and delegates block-tree generation to existing
 LexonArchiveBuilder indexing behavior through one shared local workflow with both
 direct shell and Docker Compose entrypoints.
 
@@ -116,7 +117,8 @@ The wrapper realizes one run as a staged pipeline:
 2. discover mailbox files from the fetched mirror set
 3. generate an indexer-compatible request/config artifact
 4. invoke the existing LexonArchiveBuilder batch/indexer entrypoint with any
-   caller-selected delegated clustering-mode and clustering configuration
+   caller-selected delegated clustering-provider plus clustering-mode and
+   clustering configuration
 5. capture and publish root handoff output for the resulting block tree
 
 The wrapper remains batch-oriented and does not introduce a long-lived control
@@ -186,12 +188,19 @@ argument passthrough.
 The wrapper-owned delegated clustering control surface is aligned to the
 existing delegated indexer clustering surface and is limited to:
 
+- one delegated clustering provider selector using the downstream-supported
+  provider names
 - one delegated clustering-mode selector using the downstream-supported mode
   names
 - one delegated clustering algorithm selector using the downstream-supported
   algorithm names
 - the shared delegated clustering controls supported by the downstream indexer
 - the approved algorithm-specific delegated clustering option families
+
+When the selected delegated algorithm is `adaptive`, that first-class wrapper
+surface mirrors the downstream indexer's adaptive switch-criteria family plus
+the branch-specific directional-PCA and DCBC option families needed by the
+adaptive built-in policy.
 
 The generated request artifact remains focused on discovered mailbox items,
 environment configuration, and other existing indexer-request concerns. This
@@ -222,13 +231,18 @@ RQ-SCALE-013
 
 When the caller supplies delegated clustering selections, the wrapper forwards
 those selections to the existing LexonArchiveBuilder indexer entrypoint using the
-same mode names, algorithm names, and option meanings already owned by the
-downstream indexer contract.
+same provider names, mode names, algorithm names, and option meanings already
+owned by the downstream indexer contract.
 
 The wrapper does not reinterpret algorithm-specific settings, synthesize a new
 wrapper-local clustering policy, or redefine downstream validation rules for
-unsupported mode, algorithm, or option combinations. Downstream indexer
-validation and defaulting remain authoritative.
+unsupported provider, mode, algorithm, or option combinations. Downstream
+indexer validation and defaulting remain authoritative.
+
+This includes adaptive planning: the wrapper forwards the downstream indexer's
+adaptive algorithm name, adaptive switch-criteria inputs, and branch-specific
+directional-PCA/DCBC settings without reinterpreting when the switch from
+directional PCA to DCBC should occur.
 
 For one logical wrapper run, the same effective delegated clustering
 configuration is forwarded regardless of whether the user launches through the

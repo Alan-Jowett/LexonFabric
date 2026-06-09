@@ -5,7 +5,10 @@ use ciborium::Value;
 use clap::{Args, ValueEnum};
 use lexongraph_block::EmbeddingSpec;
 use lexongraph_directional_pca::DirectionalPcaParams;
-use lexongraph_streaming_indexer::{BalanceConstraints, IndexItem, Metadata};
+use lexongraph_streaming_indexer::{
+    AdaptiveSwitchTieBreak as UpstreamAdaptiveSwitchTieBreak, BalanceConstraints, IndexItem,
+    Metadata,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -52,11 +55,35 @@ pub enum ClusteringMode {
     Divisive,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClusteringProvider {
+    #[default]
+    AdapterClusteringPlanner,
+    BuiltIn,
+}
+
+impl ClusteringProvider {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AdapterClusteringPlanner => "adapter-clustering-planner",
+            Self::BuiltIn => "built-in",
+        }
+    }
+}
+
+impl std::fmt::Display for ClusteringProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, ValueEnum, PartialEq, Eq)]
 pub enum ClusteringAlgorithm {
     #[default]
     Dcbc,
     DirectionalPca,
+    Adaptive,
 }
 
 impl ClusteringAlgorithm {
@@ -64,6 +91,7 @@ impl ClusteringAlgorithm {
         match self {
             Self::Dcbc => "dcbc",
             Self::DirectionalPca => "directional-pca",
+            Self::Adaptive => "adaptive",
         }
     }
 }
@@ -74,8 +102,37 @@ impl std::fmt::Display for ClusteringAlgorithm {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdaptiveTieBreak {
+    #[default]
+    PreferDirectionalPca,
+    PreferDcbc,
+}
+
+impl AdaptiveTieBreak {
+    pub(crate) fn to_upstream(self) -> UpstreamAdaptiveSwitchTieBreak {
+        match self {
+            Self::PreferDirectionalPca => UpstreamAdaptiveSwitchTieBreak::PreferDirectionalPca,
+            Self::PreferDcbc => UpstreamAdaptiveSwitchTieBreak::PreferDcbc,
+        }
+    }
+}
+
+impl std::fmt::Display for AdaptiveTieBreak {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::PreferDirectionalPca => "prefer-directional-pca",
+            Self::PreferDcbc => "prefer-dcbc",
+        };
+        f.write_str(value)
+    }
+}
+
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 pub struct ClusteringConfigOverrides {
+    #[arg(long, value_enum)]
+    pub clustering_provider: Option<ClusteringProvider>,
     #[arg(long, value_enum)]
     pub clustering_mode: Option<ClusteringMode>,
     #[arg(long, value_enum)]
@@ -104,30 +161,98 @@ pub struct ClusteringConfigOverrides {
     pub clustering_min_effective_rank: Option<usize>,
     #[arg(long)]
     pub clustering_min_cumulative_variance: Option<f32>,
+    #[arg(long, value_enum)]
+    pub clustering_adaptive_tie_break: Option<AdaptiveTieBreak>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ConfiguredClustering {
     Dcbc {
+        provider: ClusteringProvider,
         mode: ClusteringMode,
         cluster_count: Option<u32>,
         balance_constraints: Option<BalanceConstraints>,
         random_seed: Option<u64>,
     },
     DirectionalPca {
+        provider: ClusteringProvider,
         mode: ClusteringMode,
         cluster_count: Option<u32>,
         random_seed: Option<u64>,
         params: DirectionalPcaParams,
     },
+    Adaptive {
+        provider: ClusteringProvider,
+        mode: ClusteringMode,
+        cluster_count: Option<u32>,
+        random_seed: Option<u64>,
+        balance_constraints: Option<BalanceConstraints>,
+        params: DirectionalPcaParams,
+        tie_break: AdaptiveTieBreak,
+    },
 }
 
 impl ClusteringConfigOverrides {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        let provider = self.effective_provider();
         let algorithm = self.effective_algorithm();
+        let mode = self.effective_mode();
         self.validate_shared_numeric_options()?;
-        match algorithm {
-            ClusteringAlgorithm::Dcbc => {
+        match (provider, algorithm) {
+            (ClusteringProvider::AdapterClusteringPlanner, ClusteringAlgorithm::Dcbc) => {
+                if mode == ClusteringMode::Divisive {
+                    return Err(ConfigError::UnsupportedClusteringModeForProvider {
+                        provider,
+                        mode,
+                    });
+                }
+                if let Some(option) = [
+                    self.clustering_random_seed
+                        .map(|_| "clustering_random_seed"),
+                    self.clustering_min_cluster_occupancy
+                        .map(|_| "clustering_min_cluster_occupancy"),
+                    self.clustering_max_cluster_occupancy
+                        .map(|_| "clustering_max_cluster_occupancy"),
+                    self.clustering_max_cluster_size_ratio
+                        .map(|_| "clustering_max_cluster_size_ratio"),
+                    self.clustering_soft_balance_penalty
+                        .map(|_| "clustering_soft_balance_penalty"),
+                    self.clustering_retained_dimension_count
+                        .map(|_| "clustering_retained_dimension_count"),
+                    self.clustering_variance_exponent
+                        .map(|_| "clustering_variance_exponent"),
+                    self.clustering_temperature
+                        .map(|_| "clustering_temperature"),
+                    self.clustering_min_input_count
+                        .map(|_| "clustering_min_input_count"),
+                    self.clustering_min_effective_rank
+                        .map(|_| "clustering_min_effective_rank"),
+                    self.clustering_min_cumulative_variance
+                        .map(|_| "clustering_min_cumulative_variance"),
+                ]
+                .into_iter()
+                .flatten()
+                .next()
+                {
+                    return Err(ConfigError::UnsupportedClusteringOptionForProvider {
+                        option,
+                        provider,
+                    });
+                }
+            }
+            (ClusteringProvider::AdapterClusteringPlanner, ClusteringAlgorithm::DirectionalPca) => {
+                return Err(ConfigError::UnsupportedClusteringAlgorithmForProvider {
+                    provider,
+                    algorithm,
+                });
+            }
+            (ClusteringProvider::AdapterClusteringPlanner, ClusteringAlgorithm::Adaptive) => {
+                return Err(ConfigError::UnsupportedClusteringAlgorithmForProvider {
+                    provider,
+                    algorithm,
+                });
+            }
+            (ClusteringProvider::BuiltIn, ClusteringAlgorithm::Dcbc) => {
                 if self.clustering_retained_dimension_count.is_some() {
                     return Err(ConfigError::UnsupportedClusteringOptionForAlgorithm {
                         option: "clustering_retained_dimension_count",
@@ -165,7 +290,7 @@ impl ClusteringConfigOverrides {
                     });
                 }
             }
-            ClusteringAlgorithm::DirectionalPca => {
+            (ClusteringProvider::BuiltIn, ClusteringAlgorithm::DirectionalPca) => {
                 if self.clustering_min_cluster_occupancy.is_some() {
                     return Err(ConfigError::UnsupportedClusteringOptionForAlgorithm {
                         option: "clustering_min_cluster_occupancy",
@@ -192,6 +317,9 @@ impl ClusteringConfigOverrides {
                 }
                 self.validate_directional_pca_numeric_options()?;
             }
+            (ClusteringProvider::BuiltIn, ClusteringAlgorithm::Adaptive) => {
+                self.validate_directional_pca_numeric_options()?;
+            }
         }
 
         Ok(())
@@ -199,42 +327,60 @@ impl ClusteringConfigOverrides {
 
     pub(crate) fn to_configured_clustering(&self) -> Result<ConfiguredClustering, ConfigError> {
         self.validate()?;
+        let provider = self.effective_provider();
         let mode = self.effective_mode();
         let cluster_count = self.clustering_cluster_count;
         let random_seed = self.clustering_random_seed;
-        Ok(match self.effective_algorithm() {
-            ClusteringAlgorithm::Dcbc => ConfiguredClustering::Dcbc {
-                mode,
-                cluster_count,
-                balance_constraints: self.to_balance_constraints(),
-                random_seed,
-            },
-            ClusteringAlgorithm::DirectionalPca => ConfiguredClustering::DirectionalPca {
-                mode,
-                cluster_count,
-                random_seed,
-                params: DirectionalPcaParams {
-                    retained_dimension_count: self
-                        .clustering_retained_dimension_count
-                        .unwrap_or(DEFAULT_DIRECTIONAL_PCA_RETAINED_DIMENSION_COUNT),
-                    variance_exponent: self
-                        .clustering_variance_exponent
-                        .unwrap_or(DEFAULT_DIRECTIONAL_PCA_VARIANCE_EXPONENT),
-                    temperature: self
-                        .clustering_temperature
-                        .unwrap_or(DEFAULT_DIRECTIONAL_PCA_TEMPERATURE),
-                    min_input_count: self
-                        .clustering_min_input_count
-                        .unwrap_or(DEFAULT_DIRECTIONAL_PCA_MIN_INPUT_COUNT),
-                    min_effective_rank: self
-                        .clustering_min_effective_rank
-                        .unwrap_or(DEFAULT_DIRECTIONAL_PCA_MIN_EFFECTIVE_RANK),
-                    min_cumulative_variance: self
-                        .clustering_min_cumulative_variance
-                        .unwrap_or(DEFAULT_DIRECTIONAL_PCA_MIN_CUMULATIVE_VARIANCE),
-                },
-            },
+        Ok(match (provider, self.effective_algorithm()) {
+            (ClusteringProvider::AdapterClusteringPlanner, ClusteringAlgorithm::Dcbc) => {
+                ConfiguredClustering::Dcbc {
+                    provider,
+                    mode,
+                    cluster_count,
+                    balance_constraints: None,
+                    random_seed: None,
+                }
+            }
+            (ClusteringProvider::BuiltIn, ClusteringAlgorithm::Dcbc) => {
+                ConfiguredClustering::Dcbc {
+                    provider,
+                    mode,
+                    cluster_count,
+                    balance_constraints: self.to_balance_constraints(),
+                    random_seed,
+                }
+            }
+            (ClusteringProvider::BuiltIn, ClusteringAlgorithm::DirectionalPca) => {
+                ConfiguredClustering::DirectionalPca {
+                    provider,
+                    mode,
+                    cluster_count,
+                    random_seed,
+                    params: self.directional_pca_params(),
+                }
+            }
+            (ClusteringProvider::BuiltIn, ClusteringAlgorithm::Adaptive) => {
+                ConfiguredClustering::Adaptive {
+                    provider,
+                    mode,
+                    cluster_count,
+                    random_seed,
+                    balance_constraints: self.to_balance_constraints(),
+                    params: self.directional_pca_params(),
+                    tie_break: self.clustering_adaptive_tie_break.unwrap_or_default(),
+                }
+            }
+            (
+                ClusteringProvider::AdapterClusteringPlanner,
+                ClusteringAlgorithm::DirectionalPca | ClusteringAlgorithm::Adaptive,
+            ) => {
+                unreachable!("validated incompatible provider and algorithm")
+            }
         })
+    }
+
+    fn effective_provider(&self) -> ClusteringProvider {
+        self.clustering_provider.unwrap_or_default()
     }
 
     fn effective_algorithm(&self) -> ClusteringAlgorithm {
@@ -243,6 +389,29 @@ impl ClusteringConfigOverrides {
 
     fn effective_mode(&self) -> ClusteringMode {
         self.clustering_mode.unwrap_or_default()
+    }
+
+    fn directional_pca_params(&self) -> DirectionalPcaParams {
+        DirectionalPcaParams {
+            retained_dimension_count: self
+                .clustering_retained_dimension_count
+                .unwrap_or(DEFAULT_DIRECTIONAL_PCA_RETAINED_DIMENSION_COUNT),
+            variance_exponent: self
+                .clustering_variance_exponent
+                .unwrap_or(DEFAULT_DIRECTIONAL_PCA_VARIANCE_EXPONENT),
+            temperature: self
+                .clustering_temperature
+                .unwrap_or(DEFAULT_DIRECTIONAL_PCA_TEMPERATURE),
+            min_input_count: self
+                .clustering_min_input_count
+                .unwrap_or(DEFAULT_DIRECTIONAL_PCA_MIN_INPUT_COUNT),
+            min_effective_rank: self
+                .clustering_min_effective_rank
+                .unwrap_or(DEFAULT_DIRECTIONAL_PCA_MIN_EFFECTIVE_RANK),
+            min_cumulative_variance: self
+                .clustering_min_cumulative_variance
+                .unwrap_or(DEFAULT_DIRECTIONAL_PCA_MIN_CUMULATIVE_VARIANCE),
+        }
     }
 
     fn to_balance_constraints(&self) -> Option<BalanceConstraints> {
@@ -477,6 +646,21 @@ pub enum ConfigError {
     UnsupportedClusteringOptionForAlgorithm {
         option: &'static str,
         algorithm: ClusteringAlgorithm,
+    },
+    #[error("clustering algorithm {algorithm} is not supported for provider {provider}")]
+    UnsupportedClusteringAlgorithmForProvider {
+        provider: ClusteringProvider,
+        algorithm: ClusteringAlgorithm,
+    },
+    #[error("clustering mode {mode:?} is not supported for provider {provider}")]
+    UnsupportedClusteringModeForProvider {
+        provider: ClusteringProvider,
+        mode: ClusteringMode,
+    },
+    #[error("clustering option {option} is not supported for provider {provider}")]
+    UnsupportedClusteringOptionForProvider {
+        option: &'static str,
+        provider: ClusteringProvider,
     },
     #[error("invalid clustering option {option}: {message}")]
     InvalidClusteringOption {
@@ -842,18 +1026,20 @@ mod tests {
     }
 
     #[test]
-    fn clustering_defaults_to_aggregation_dcbc_with_no_explicit_cli_options() {
+    fn clustering_defaults_to_adapter_aggregation_dcbc_with_no_explicit_cli_options() {
         let clustering = ClusteringConfigOverrides::default()
             .to_configured_clustering()
             .unwrap();
 
         match clustering {
             ConfiguredClustering::Dcbc {
+                provider,
                 mode,
                 cluster_count,
                 balance_constraints,
                 random_seed,
             } => {
+                assert_eq!(provider, ClusteringProvider::AdapterClusteringPlanner);
                 assert_eq!(mode, ClusteringMode::Aggregation);
                 assert_eq!(cluster_count, None);
                 assert!(balance_constraints.is_none());
@@ -862,12 +1048,16 @@ mod tests {
             ConfiguredClustering::DirectionalPca { .. } => {
                 panic!("expected default clustering algorithm to be dcbc")
             }
+            ConfiguredClustering::Adaptive { .. } => {
+                panic!("expected default clustering algorithm to be dcbc")
+            }
         }
     }
 
     #[test]
     fn directional_pca_defaults_are_applied_when_algorithm_is_selected() {
         let clustering = ClusteringConfigOverrides {
+            clustering_provider: Some(ClusteringProvider::BuiltIn),
             clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
             ..ClusteringConfigOverrides::default()
         }
@@ -876,11 +1066,13 @@ mod tests {
 
         match clustering {
             ConfiguredClustering::DirectionalPca {
+                provider,
                 mode,
                 cluster_count,
                 random_seed,
                 params,
             } => {
+                assert_eq!(provider, ClusteringProvider::BuiltIn);
                 assert_eq!(mode, ClusteringMode::Aggregation);
                 assert_eq!(cluster_count, None);
                 assert_eq!(random_seed, None);
@@ -899,12 +1091,63 @@ mod tests {
             ConfiguredClustering::Dcbc { .. } => {
                 panic!("expected directional-pca settings when that algorithm is selected")
             }
+            ConfiguredClustering::Adaptive { .. } => {
+                panic!("expected directional-pca settings when that algorithm is selected")
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_defaults_are_applied_when_algorithm_is_selected() {
+        let clustering = ClusteringConfigOverrides {
+            clustering_provider: Some(ClusteringProvider::BuiltIn),
+            clustering_algorithm: Some(ClusteringAlgorithm::Adaptive),
+            ..ClusteringConfigOverrides::default()
+        }
+        .to_configured_clustering()
+        .unwrap();
+
+        match clustering {
+            ConfiguredClustering::Adaptive {
+                provider,
+                mode,
+                cluster_count,
+                random_seed,
+                balance_constraints,
+                params,
+                tie_break,
+            } => {
+                assert_eq!(provider, ClusteringProvider::BuiltIn);
+                assert_eq!(mode, ClusteringMode::Aggregation);
+                assert_eq!(cluster_count, None);
+                assert_eq!(random_seed, None);
+                assert!(balance_constraints.is_none());
+                assert_eq!(
+                    params,
+                    DirectionalPcaParams {
+                        retained_dimension_count: DEFAULT_DIRECTIONAL_PCA_RETAINED_DIMENSION_COUNT,
+                        variance_exponent: DEFAULT_DIRECTIONAL_PCA_VARIANCE_EXPONENT,
+                        temperature: DEFAULT_DIRECTIONAL_PCA_TEMPERATURE,
+                        min_input_count: DEFAULT_DIRECTIONAL_PCA_MIN_INPUT_COUNT,
+                        min_effective_rank: DEFAULT_DIRECTIONAL_PCA_MIN_EFFECTIVE_RANK,
+                        min_cumulative_variance: DEFAULT_DIRECTIONAL_PCA_MIN_CUMULATIVE_VARIANCE,
+                    }
+                );
+                assert_eq!(tie_break, AdaptiveTieBreak::PreferDirectionalPca);
+            }
+            ConfiguredClustering::Dcbc { .. } => {
+                panic!("expected adaptive settings when that algorithm is selected")
+            }
+            ConfiguredClustering::DirectionalPca { .. } => {
+                panic!("expected adaptive settings when that algorithm is selected")
+            }
         }
     }
 
     #[test]
     fn divisive_mode_is_applied_when_selected() {
         let clustering = ClusteringConfigOverrides {
+            clustering_provider: Some(ClusteringProvider::BuiltIn),
             clustering_mode: Some(ClusteringMode::Divisive),
             ..ClusteringConfigOverrides::default()
         }
@@ -918,12 +1161,16 @@ mod tests {
             ConfiguredClustering::DirectionalPca { .. } => {
                 panic!("expected default clustering algorithm to remain dcbc")
             }
+            ConfiguredClustering::Adaptive { .. } => {
+                panic!("expected default clustering algorithm to remain dcbc")
+            }
         }
     }
 
     #[test]
     fn dcbc_rejects_directional_pca_only_options() {
         let error = ClusteringConfigOverrides {
+            clustering_provider: Some(ClusteringProvider::BuiltIn),
             clustering_retained_dimension_count: Some(1),
             ..ClusteringConfigOverrides::default()
         }
@@ -942,6 +1189,7 @@ mod tests {
     #[test]
     fn directional_pca_rejects_dcbc_only_options() {
         let error = ClusteringConfigOverrides {
+            clustering_provider: Some(ClusteringProvider::BuiltIn),
             clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
             clustering_min_cluster_occupancy: Some(1),
             ..ClusteringConfigOverrides::default()
@@ -961,6 +1209,7 @@ mod tests {
     #[test]
     fn directional_pca_requires_retained_dimension_count_not_exceed_cluster_count() {
         let error = ClusteringConfigOverrides {
+            clustering_provider: Some(ClusteringProvider::BuiltIn),
             clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
             clustering_cluster_count: Some(2),
             clustering_retained_dimension_count: Some(3),
@@ -981,6 +1230,7 @@ mod tests {
     #[test]
     fn omitted_directional_pca_cluster_count_allows_larger_retained_dimension_count() {
         let clustering = ClusteringConfigOverrides {
+            clustering_provider: Some(ClusteringProvider::BuiltIn),
             clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
             clustering_retained_dimension_count: Some(3),
             ..ClusteringConfigOverrides::default()
@@ -1000,6 +1250,63 @@ mod tests {
             ConfiguredClustering::Dcbc { .. } => {
                 panic!("expected directional-pca settings when that algorithm is selected")
             }
+            ConfiguredClustering::Adaptive { .. } => {
+                panic!("expected directional-pca settings when that algorithm is selected")
+            }
         }
+    }
+
+    #[test]
+    fn adapter_provider_rejects_divisive_mode() {
+        let error = ClusteringConfigOverrides {
+            clustering_mode: Some(ClusteringMode::Divisive),
+            ..ClusteringConfigOverrides::default()
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::UnsupportedClusteringModeForProvider {
+                provider: ClusteringProvider::AdapterClusteringPlanner,
+                mode: ClusteringMode::Divisive,
+            }
+        ));
+    }
+
+    #[test]
+    fn adapter_provider_rejects_directional_pca() {
+        let error = ClusteringConfigOverrides {
+            clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
+            ..ClusteringConfigOverrides::default()
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::UnsupportedClusteringAlgorithmForProvider {
+                provider: ClusteringProvider::AdapterClusteringPlanner,
+                algorithm: ClusteringAlgorithm::DirectionalPca,
+            }
+        ));
+    }
+
+    #[test]
+    fn adapter_provider_rejects_adaptive() {
+        let error = ClusteringConfigOverrides {
+            clustering_algorithm: Some(ClusteringAlgorithm::Adaptive),
+            ..ClusteringConfigOverrides::default()
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::UnsupportedClusteringAlgorithmForProvider {
+                provider: ClusteringProvider::AdapterClusteringPlanner,
+                algorithm: ClusteringAlgorithm::Adaptive,
+            }
+        ));
     }
 }

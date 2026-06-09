@@ -5,8 +5,9 @@
 Specification patch for the approved email-artifact, chunk-level
 indexing, local filesystem block-store interoperability, replay-based
 streaming delegated indexing, stage-selectable execution, standalone
-clustering input discovery, clustering-mode and clustering-algorithm
-selection, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream
+clustering input discovery, clustering-provider plus clustering-mode and
+clustering-algorithm selection, adaptive built-in planning exposure,
+clustering-option exposure, latest planning-policy and telemetry compatibility, upstream
 regression assessment, replay-submission and streaming-status observability,
 clustering-failure diagnostics, rooted block-tree quality assessment with
 rooted TNN-recall diagnostics, rooted CLI search over stored trees,
@@ -20,8 +21,9 @@ indexer requirements, including the email-ingestion refinement from `.mail` and
 `.mbox` mailbox sources to normalized email artifacts and chunk-level embedding
 units plus the local filesystem block-store interoperability correction,
 replay-based streaming delegated indexing adoption, stage-selectable execution,
-standalone clustering input discovery, delegated clustering-mode and
-clustering-algorithm selection, algorithm-specific clustering-option exposure, latest
+standalone clustering input discovery, delegated clustering-provider plus
+clustering-mode and clustering-algorithm selection, adaptive built-in
+planning exposure, algorithm-specific clustering-option exposure, latest
 planning-policy and telemetry compatibility, upstream regression
 assessment, embedding-phase batch-progress observability,
 replay-submission observability, streaming-status observability,
@@ -38,6 +40,8 @@ This document is layered on top of:
   `crates/lexongraph-streaming-indexer/src/lib.rs`
 - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
   `crates/lexongraph-streaming-clustering/src/lib.rs`
+- external LexonGraph repository source (not vendored in LexonArchiveBuilder):
+  `crates/lexongraph-adaptive-planning-policy/src/lib.rs`
 - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
   `crates/lexongraph-block-store/src/lib.rs`
 - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
@@ -248,10 +252,16 @@ serialization schema for the staging artifact in the specification layer.
 ### DSG-LFI-001G `Delegated planning selection seam`
 
 For any execution stage that includes clustering, LexonArchiveBuilder resolves
-one explicit upstream clustering mode, constructs one explicit upstream
-`BuiltInPlanning` selection within the upstream-supported mode-and-algorithm
-matrix, and wraps that planning choice in one `BuiltInPlanningPolicy` before
-the first streaming planning pass or standalone clustering replay begins.
+one explicit upstream clustering provider, one explicit upstream clustering
+mode when required by that provider, constructs one explicit upstream planning
+selection within the upstream-supported provider-and-mode-and-algorithm matrix,
+and wraps that planning choice in the corresponding upstream planning-policy
+shape before the first streaming planning pass or standalone clustering replay
+begins.
+
+The supported delegated clustering provider choices in this increment include
+the adapter clustering planner, using the upstream-supported provider name for
+that planner.
 
 The supported delegated clustering modes in this increment are:
 
@@ -262,23 +272,31 @@ The supported built-in delegated clustering choices in this increment are:
 
 - `dcbc`
 - `directional-pca`
+- `adaptive`
+
+When the caller selects built-in `adaptive`, LexonArchiveBuilder maps that
+selection onto upstream `AdaptivePlanningSettings`, preserving the upstream
+adaptive meaning that planning begins with directional PCA and may switch to
+DCBC when the adaptive switch criteria say to do so.
 
 LexonArchiveBuilder treats the upstream LexonGraph streaming indexer as the
-authority for clustering-mode and algorithm execution semantics and only maps
-repository-owned configuration onto that explicit upstream planning selection.
-The selected clustering mode, algorithm, and effective option values remain
-fixed for the lifetime of one batch invocation so replay passes, planning
-completion, and final materialization do not observe intra-run clustering-
-configuration drift.
+authority for clustering-provider, clustering-mode, and algorithm execution
+semantics and only maps repository-owned configuration onto that explicit
+upstream planning selection. The selected clustering provider, mode,
+algorithm, and effective option values remain fixed for the lifetime of one
+batch invocation so replay passes, planning completion, and final
+materialization do not observe intra-run clustering-configuration drift.
 
-The design default for omitted clustering-mode configuration is
-aggregation-based clustering. The default delegated algorithm within that mode
-remains the repository's existing built-in default path.
+The design default for omitted clustering-provider configuration is the adapter
+clustering planner. The design default for omitted clustering-mode
+configuration remains aggregation-based clustering. The default delegated
+algorithm within the selected provider remains the repository's existing
+default path when that provider consumes built-in algorithm choice.
 
-**[UNKNOWN: exact upstream-supported mode-and-algorithm compatibility matrix]**
+**[UNKNOWN: exact upstream-supported provider-and-mode-and-algorithm compatibility matrix]**
 The design therefore constrains LexonArchiveBuilder to validate or reject
-unsupported mode-and-algorithm combinations explicitly rather than silently
-falling back to a different delegated planning shape.
+unsupported provider, mode, and algorithm combinations explicitly rather than
+silently falling back to a different delegated planning shape.
 
 **Traces to:** RQ-INDEXER-003F, RQ-INDEXER-008, RQ-INDEXER-010A
 
@@ -290,6 +308,7 @@ delegated streaming indexer.
 
 Shared clustering inputs are:
 
+- clustering provider
 - clustering mode
 - algorithm choice
 - `cluster_count`
@@ -312,6 +331,16 @@ The `directional-pca` path additionally accepts the upstream
 - `min_effective_rank`
 - `min_cumulative_variance`
 
+The `adaptive` path additionally accepts one upstream adaptive switch-criteria
+family plus the branch-specific option families needed by its directional-PCA
+and DCBC sub-policies.
+
+That adaptive normalization maps the shared clustering-mode selector onto the
+upstream adaptive direction, preserves the explicit directional-PCA-first then
+DCBC-switch semantics from the approved requirements patch, and constructs one
+explicit upstream `AdaptivePlanningSettings` object rather than collapsing
+adaptive planning to a hidden repository preset.
+
 Algorithm-specific options that do not belong to the selected algorithm are
 rejected during LexonArchiveBuilder's CLI/configuration validation rather than
 being silently ignored. Mode-and-algorithm combinations that are unsupported on
@@ -328,7 +357,7 @@ repository defaults:
 - `min_effective_rank = 1`
 - `min_cumulative_variance = 0.0`
 
-When a caller selects either built-in clustering algorithm and omits
+When a caller selects either fixed built-in clustering algorithm and omits
 `cluster_count`, LexonArchiveBuilder derives the effective cluster count from:
 
 - the number of clustering inputs
@@ -359,7 +388,7 @@ upgrade whenever the latest upstream contract still supports them semantically:
 
 - the external stage contract
 - deterministic split-stage replay
-- explicit `dcbc` and `directional-pca` selection
+- explicit `dcbc`, `directional-pca`, and `adaptive` selection
 - omitted `cluster_count` auto-sizing with explicit override preservation
 - repository-owned progress projection over upstream lifecycle events
 - projection of richer live hierarchy-stage telemetry and heartbeat events onto
@@ -1057,14 +1086,16 @@ RQ-INDEXER-010
 
 ### DSG-LFI-007C `Clustering CLI surface`
 
-LexonArchiveBuilder exposes clustering-mode selection, clustering selection,
-and clustering-option flags on the `run` command alongside the existing
+LexonArchiveBuilder exposes clustering-provider selection, clustering-mode
+selection, clustering selection, and clustering-option flags on the `run`
+command alongside the existing
 request-file and stage-selection surface.
 
 The CLI surface is organized as one shared selector plus algorithm-scoped
 options:
 
 - `--clustering-mode`
+- `--clustering-provider`
 - `--clustering-algorithm`
 - `--clustering-cluster-count`
 - `--clustering-random-seed`
@@ -1079,12 +1110,21 @@ options:
 - `--clustering-min-effective-rank`
 - `--clustering-min-cumulative-variance`
 
+When the selected algorithm is `adaptive`, the CLI additionally exposes one
+adaptive switch-criteria family plus explicit branch-specific option families
+for the adaptive directional-PCA and DCBC sub-policies.
+
+**[UNKNOWN: exact CLI spellings for the adaptive switch-tie-break selector and
+any namespaced adaptive branch-option flags needed beyond the already-approved
+shared, directional-PCA, and DCBC flag families]**
+
 LexonArchiveBuilder parses these flags after loading the request file and
 resolves them into one effective clustering configuration used only when the
 selected execution stage includes clustering. The `ingestion+embedding` stage
 ignores clustering execution, but still rejects syntactically invalid
-clustering mode, algorithm, and option combinations at argument-validation time
-so misconfigured automation fails early and explicitly.
+clustering provider, mode, algorithm, and option combinations at
+argument-validation time so misconfigured automation fails early and
+explicitly.
 
 This increment keeps clustering-option exposure on the CLI boundary. The
 request-file `BatchRequest` contract remains unchanged unless a later semantic
@@ -1244,8 +1284,9 @@ LexonArchiveBuilder-owned verification artifacts validate:
 - correct leaf-layer concurrency scheduling with cross-layer barriers
 - correct standalone clustering input discovery through the upstream block-
   iteration contract
-- correct explicit delegated clustering-mode and clustering-algorithm
-  selection plus algorithm-specific option normalization on the CLI surface
+- correct explicit delegated clustering-provider plus clustering-mode and
+  clustering-algorithm selection plus algorithm-specific option normalization on
+  the CLI surface
 - correct deterministic replay staging and replay-stable content fingerprinting
 - correct selection and use of content-resolution, block-store, and
   embedding-provider adapters

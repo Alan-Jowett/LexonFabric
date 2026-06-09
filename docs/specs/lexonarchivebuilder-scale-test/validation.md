@@ -3,7 +3,7 @@
 ## Status
 
 Phase 2 validation patch for the approved local rsync-driven stress-test
-wrapper and caller-selectable delegated clustering mode and configuration in
+wrapper and caller-selectable delegated clustering provider, mode, algorithm, and adaptive-option configuration in
 `docs/specs/lexonarchivebuilder-scale-test/requirements.md` and
 `docs/specs/lexonarchivebuilder-scale-test/design.md`.
 
@@ -66,12 +66,15 @@ DSG-LST-005, DSG-LST-010
 Inspect the caller-facing delegated clustering control surface for
 `lexonarchivebuilder-scale-test`.
 
-**Pass condition:** the wrapper exposes one explicit delegated clustering-mode
-selector with aggregation as the default and divisive as an explicit opt-in,
-one explicit delegated clustering-algorithm selector, plus the approved shared
-and algorithm-specific delegated clustering option families, aligned to the
-downstream indexer contract, and does not rely on a generic opaque extra-
-argument passthrough surface.
+**Pass condition:** the wrapper exposes one explicit delegated clustering-
+provider selector with the adapter clustering planner as the default, one
+explicit delegated clustering-mode selector with aggregation as the default and
+divisive as an explicit opt-in, one explicit delegated clustering-algorithm
+selector, plus the approved shared and algorithm-specific delegated clustering
+option families, including adaptive switch criteria and adaptive
+directional-PCA/DCBC branch-specific settings when `adaptive` is selected,
+aligned to the downstream indexer contract, and does not rely on a generic
+opaque extra-argument passthrough surface.
 
 **Traces to:** RQ-SCALE-003E, RQ-SCALE-003F, DSG-LST-005B, DSG-LST-010A
 
@@ -80,10 +83,12 @@ argument passthrough surface.
 Inspect the delegated clustering control surface across the supported bash and
 Docker Compose entrypoints.
 
-**Pass condition:** both entrypoints preserve the same delegated clustering-mode
-selector, delegated clustering-algorithm selector, and delegated option family,
-with the same downstream meaning for one logical run, rather than introducing
-entrypoint-specific clustering behavior.
+**Pass condition:** both entrypoints preserve the same delegated clustering-
+provider selector, delegated clustering-mode selector, delegated clustering-
+algorithm selector, and delegated option family, including the same adaptive
+option families when `adaptive` is selected, with the same downstream meaning
+for one logical run, rather than introducing entrypoint-specific clustering
+behavior.
 
 **Traces to:** RQ-SCALE-003D, RQ-SCALE-003E, RQ-SCALE-003F, RQ-SCALE-010A,
 DSG-LST-005B, DSG-LST-006A, DSG-LST-010A
@@ -130,9 +135,10 @@ Execute a representative local run with explicit delegated clustering
 selection.
 
 **Pass condition:** the wrapper accepts the selected delegated clustering
-algorithm and supported delegated clustering options while preserving the
-approved rsync -> discovery -> generated request/config -> delegated
-parser/indexer -> root handoff stage order.
+provider, delegated clustering algorithm, and supported delegated clustering
+options, including adaptive switch and branch-specific options when adaptive is
+selected, while preserving the approved rsync -> discovery -> generated
+request/config -> delegated parser/indexer -> root handoff stage order.
 
 **Traces to:** RQ-SCALE-003E, RQ-SCALE-003F, RQ-SCALE-004A, DSG-LST-003,
 DSG-LST-005B, DSG-LST-006A
@@ -156,8 +162,10 @@ delegated clustering inputs are supplied.
 
 **Pass condition:** the generated request artifact remains compatible with the
 existing local indexer request contract, while the selected delegated
-clustering configuration is forwarded through the downstream invocation rather
-than being serialized into a wrapper-local clustering protocol.
+clustering configuration, including provider selection and any adaptive switch
+or branch-specific option values, is forwarded through the downstream
+invocation rather than being serialized into a wrapper-local clustering
+protocol.
 
 **Traces to:** RQ-SCALE-003F, RQ-SCALE-004A, RQ-SCALE-010A, DSG-LST-005B,
 DSG-LST-006A, DSG-LST-010A

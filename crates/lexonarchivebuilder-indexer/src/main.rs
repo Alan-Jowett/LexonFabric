@@ -294,6 +294,8 @@ mod tests {
             "run",
             "--request",
             "request.json",
+            "--clustering-provider",
+            "built-in",
             "--clustering-mode",
             "divisive",
             "--clustering-algorithm",
@@ -320,6 +322,10 @@ mod tests {
         match cli.command {
             Command::Run { clustering, .. } => {
                 assert_eq!(
+                    clustering.clustering_provider,
+                    Some(lexonarchivebuilder_indexer::ClusteringProvider::BuiltIn)
+                );
+                assert_eq!(
                     clustering.clustering_mode,
                     Some(lexonarchivebuilder_indexer::ClusteringMode::Divisive)
                 );
@@ -335,6 +341,71 @@ mod tests {
                 assert_eq!(clustering.clustering_min_input_count, Some(2));
                 assert_eq!(clustering.clustering_min_effective_rank, Some(1));
                 assert_eq!(clustering.clustering_min_cumulative_variance, Some(0.25));
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn run_command_parses_adaptive_clustering_options() {
+        let cli = Cli::try_parse_from([
+            "lexonarchivebuilder-indexer",
+            "run",
+            "--request",
+            "request.json",
+            "--clustering-provider",
+            "built-in",
+            "--clustering-mode",
+            "aggregation",
+            "--clustering-algorithm",
+            "adaptive",
+            "--clustering-cluster-count",
+            "3",
+            "--clustering-random-seed",
+            "7",
+            "--clustering-retained-dimension-count",
+            "1",
+            "--clustering-variance-exponent",
+            "1.5",
+            "--clustering-temperature",
+            "0.75",
+            "--clustering-min-input-count",
+            "2",
+            "--clustering-min-effective-rank",
+            "1",
+            "--clustering-min-cumulative-variance",
+            "0.25",
+            "--clustering-adaptive-tie-break",
+            "prefer-dcbc",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Run { clustering, .. } => {
+                assert_eq!(
+                    clustering.clustering_provider,
+                    Some(lexonarchivebuilder_indexer::ClusteringProvider::BuiltIn)
+                );
+                assert_eq!(
+                    clustering.clustering_mode,
+                    Some(lexonarchivebuilder_indexer::ClusteringMode::Aggregation)
+                );
+                assert_eq!(
+                    clustering.clustering_algorithm,
+                    Some(lexonarchivebuilder_indexer::ClusteringAlgorithm::Adaptive)
+                );
+                assert_eq!(clustering.clustering_cluster_count, Some(3));
+                assert_eq!(clustering.clustering_random_seed, Some(7));
+                assert_eq!(clustering.clustering_retained_dimension_count, Some(1));
+                assert_eq!(clustering.clustering_variance_exponent, Some(1.5));
+                assert_eq!(clustering.clustering_temperature, Some(0.75));
+                assert_eq!(clustering.clustering_min_input_count, Some(2));
+                assert_eq!(clustering.clustering_min_effective_rank, Some(1));
+                assert_eq!(clustering.clustering_min_cumulative_variance, Some(0.25));
+                assert_eq!(
+                    clustering.clustering_adaptive_tie_break,
+                    Some(lexonarchivebuilder_indexer::AdaptiveTieBreak::PreferDcbc)
+                );
             }
             _ => panic!("expected run command"),
         }

@@ -8,7 +8,8 @@ streaming delegated indexing, stage-selectable execution, standalone
 clustering input discovery, clustering-algorithm selection, clustering-option
 exposure, latest planning-policy and telemetry compatibility, upstream
 regression assessment, replay-submission and streaming-status observability,
-clustering-failure diagnostics, replay-stable fingerprinting, and
+clustering-failure diagnostics, rooted block-tree quality assessment,
+rooted CLI search over stored trees, replay-stable fingerprinting, and
 layer-parallel block-construction evolution in
 `docs/specs/lexonarchivebuilder-indexer/requirements.md` and
 `docs/specs/lexonarchivebuilder-indexer/design.md`.
@@ -23,7 +24,8 @@ delegated clustering-algorithm selection, algorithm-specific clustering-option
 exposure, latest planning-policy and telemetry compatibility, upstream
 regression assessment, embedding-phase batch-progress observability,
 replay-submission observability, streaming-status observability,
-telemetry-count-semantics clarity, clustering-failure diagnostics,
+telemetry-count-semantics clarity, clustering-failure diagnostics, rooted
+block-tree quality assessment, rooted CLI search over stored trees,
 replay-stable fingerprinting, and leaf-layer parallel block scheduling in the
 local/testing profile.
 
@@ -206,6 +208,31 @@ dropped.
 
 **Traces to:** RQ-INDEXER-003I, DSG-LFI-001I
 
+### VAL-LFI-002O
+
+Inspect the rooted block-tree quality operator surface.
+
+**Pass condition:** LexonArchiveBuilder exposes one CLI-only assessment surface
+that accepts a configured block-store boundary plus a caller-supplied root block
+identifier, does not require request-file batch execution or MCP exposure, and
+renders both an operator-readable summary and a machine-readable JSON report for
+the rooted analysis result without requiring an operator-visible quantile-bin
+configuration surface in this increment.
+
+**Traces to:** RQ-INDEXER-008D, DSG-LFI-002D, DSG-LFI-005B, DSG-LFI-007D
+
+### VAL-LFI-002P
+
+Inspect the rooted CLI search operator surface.
+
+**Pass condition:** LexonArchiveBuilder exposes one CLI-only rooted search
+surface that accepts query text, a caller-provided embedding endpoint, a
+caller-supplied root block identifier, and `k`, does not require request-file
+batch execution or MCP exposure, and emits both operator-readable results and
+machine-readable JSON output for one invocation.
+
+**Traces to:** RQ-INDEXER-008E, DSG-LFI-002E, DSG-LFI-006A, DSG-LFI-007E
+
 ### VAL-LFI-002A
 
 Run mailbox ingestion through the LexonArchiveBuilder-owned preprocessing pipeline.
@@ -281,7 +308,10 @@ neutral, the local/testing profile is executable end to end, and the production
 profile remains representable through the same adapter-selection boundary
 without requiring Azure-specific execution in the first MVP. This neutrality
 also applies to normalized email artifacts and mailbox provenance artifacts that
-share the same `BlockStore` abstraction family.
+share the same `BlockStore` abstraction family, and to the rooted block-tree
+quality tool when it reads stored trees through that same boundary.
+The same neutrality also applies to rooted CLI search over a caller-supplied
+tree when it reads through the same `BlockStore` boundary.
 
 **Traces to:** RQ-INDEXER-005, RQ-INDEXER-006, RQ-INDEXER-007, DSG-LFI-005,
 DSG-LFI-006, DSG-LFI-007, DSG-LFI-008
@@ -328,6 +358,47 @@ Validation may treat the local store as fresh for this increment rather than
 requiring reads from the superseded custom filesystem layout.
 
 **Traces to:** RQ-INDEXER-005, RQ-INDEXER-010B, DSG-LFI-005, DSG-LFI-005A
+
+### VAL-LFI-005B
+
+Run the rooted block-tree quality tool against a representative stored tree
+whose reachable rooted snapshot contains at least one known structural defect or
+boundary case plus enough block variation to exercise per-layer cohesion,
+separation, PCA-axis, quantile-occupancy, and split-effectiveness reporting.
+
+**Pass condition:** the assessment traverses only the blocks reachable from the
+caller-supplied root, reports hard structural findings separately from advisory
+embedding-space quality statistics, identifies the affected block relationships,
+and emits both per-block and aggregate quantitative evidence about the rooted
+tree's represented embedding-space region in the human-readable summary and the
+JSON artifact. That evidence includes per-block mean distance from centroid,
+per-layer mean and standard deviation for intra-block dispersion,
+per-layer mean and standard deviation for sibling centroid-to-centroid
+distance, per-block and per-layer PCA first-axis-strength reporting,
+per-block quantile-bin occupancy counts plus occupancy variance with explicit
+empty-bin detection and overfull-bin detection for bins whose occupancy exceeds
+two times the expected value, and per-parent split-effectiveness statistics.
+The required parent-versus-child centroid-distance heuristic is represented as
+aggregate split-effectiveness evidence, including the percentage of children
+whose dispersion exceeds the parent's plus the mean and maximum increase,
+rather than as emitted per-pair warning findings.
+
+**Traces to:** RQ-INDEXER-005, RQ-INDEXER-008D, DSG-LFI-002D, DSG-LFI-005B
+
+### VAL-LFI-005C
+
+Run the rooted CLI search tool against a representative stored tree whose
+reachable rooted snapshot contains more searchable leaf nodes than the selected
+`k`.
+
+**Pass condition:** the tool generates a query embedding through the
+caller-supplied endpoint, searches only the leaf nodes reachable from the
+caller-supplied root through subordinate `lexongraph-search` usage, returns the
+top `k` matching leaf nodes, and emits the same rooted result set on the
+human-readable and JSON output surfaces.
+
+**Traces to:** RQ-INDEXER-005, RQ-INDEXER-006, RQ-INDEXER-008E, DSG-LFI-002E,
+DSG-LFI-005C, DSG-LFI-006A, DSG-LFI-007E
 
 ### VAL-LFI-006
 
@@ -496,6 +567,35 @@ LexonGraph contracts.
 redefine their public semantics.
 
 **Traces to:** RQ-INDEXER-010A, DSG-LFI-001, DSG-LFI-011
+
+### VAL-LFI-009B
+
+Inspect the specification package for the rooted block-tree quality increment
+against MCP and upstream block-validity boundaries.
+
+**Pass condition:** the package keeps the assessment tool on a CLI-only operator
+surface, does not redefine MCP retrieval or search behavior, and does not
+reinterpret advisory embedding-space quality heuristics as new upstream
+LexonGraph block-validity rules. The package also keeps quantile-bin selection
+behind a repository-defined default rather than introducing a new operator
+parameter surface in this increment.
+
+**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-009, RQ-INDEXER-010A, DSG-LFI-002D,
+DSG-LFI-009, DSG-LFI-011
+
+### VAL-LFI-009C
+
+Inspect the specification package for the rooted CLI search increment against
+MCP and upstream search-boundary constraints.
+
+**Pass condition:** the package keeps rooted CLI search additive to the MCP
+search surface, uses subordinate `lexongraph-search` semantics instead of a
+repository-local search algorithm, and does not invent a second repository-local
+search corpus model outside the approved rooted-tree plus `BlockStore`
+boundaries.
+
+**Traces to:** RQ-INDEXER-008E, RQ-INDEXER-009, RQ-INDEXER-010A, DSG-LFI-002E,
+DSG-LFI-005C, DSG-LFI-009, DSG-LFI-011
 
 ### VAL-LFI-009A
 

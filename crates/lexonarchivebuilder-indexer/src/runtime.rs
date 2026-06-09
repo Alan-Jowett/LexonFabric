@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-use half::f16;
 use lexongraph_block::{
     Block, BlockError, BlockHash, EmbeddingSpec, LeafEntry, SerializedBlock, VERSION_1,
     build_leaf_block, deserialize_block, serialize_block,
@@ -34,6 +33,7 @@ use crate::paths::resolve_path;
 use crate::resolver::{
     ContentRef, LocalFilesystemContentResolver, LocalFilesystemContentResolverError,
 };
+use crate::tree_tools::decode_embedding_values;
 
 type ProgressReporter = Arc<dyn Fn(String) + Send + Sync + 'static>;
 
@@ -2384,40 +2384,6 @@ fn hash_bytes(bytes: &[u8]) -> BlockHash {
 
 fn hash_embedding_input(input: &EmbeddingInput) -> BlockHash {
     hash_embedding_content(&input.media_type, &input.body)
-}
-
-fn decode_embedding_values(bytes: &[u8], embedding_spec: &EmbeddingSpec) -> Option<Vec<f32>> {
-    let dimension_count = usize::try_from(embedding_spec.dims).ok()?;
-    match embedding_spec.encoding.as_str() {
-        "f32le" => {
-            if bytes.len() != dimension_count.checked_mul(4)? {
-                return None;
-            }
-            Some(
-                bytes
-                    .chunks_exact(4)
-                    .map(|chunk| {
-                        f32::from_le_bytes(chunk.try_into().expect("embedding chunk size is fixed"))
-                    })
-                    .collect(),
-            )
-        }
-        "f16le" => {
-            if bytes.len() != dimension_count.checked_mul(2)? {
-                return None;
-            }
-            Some(
-                bytes
-                    .chunks_exact(2)
-                    .map(|chunk| {
-                        f16::from_le_bytes(chunk.try_into().expect("embedding chunk size is fixed"))
-                            .to_f32()
-                    })
-                    .collect(),
-            )
-        }
-        _ => None,
-    }
 }
 
 fn placeholder_root_id() -> String {

@@ -3,8 +3,8 @@
 ## Document Status
 
 - **Phase:** Phase 1 - Requirements Discovery
-- **Status:** Approved streaming-indexer migration baseline with incremental requirements patches for latest LexonGraph planning-policy and telemetry compatibility, upstream regression assessment, and clustering-failure diagnostics
-- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream regression assessment, embedding-phase, replay-submission and streaming-status observability, clustering-failure diagnosability, and layer-parallel block-construction evolution
+- **Status:** Approved streaming-indexer migration baseline with incremental requirements patches for latest LexonGraph planning-policy and telemetry compatibility, upstream regression assessment, clustering-failure diagnostics, rooted block-tree quality assessment discovery plus quality-metric refinement, and rooted CLI search discovery
+- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream regression assessment, embedding-phase, replay-submission and streaming-status observability, clustering-failure diagnosability, rooted block-tree quality assessment with refined per-layer quality metrics, rooted CLI search over stored trees, and layer-parallel block-construction evolution
 
 ## USER-REQUEST
 
@@ -87,6 +87,27 @@
 - **UR-77 [KNOWN]:** For clustering failures caused by degenerate or suspicious embedding sets, operators need compact embedding-health diagnostics plus a small suspicious-input sample rather than a full dump of every raw embedding vector.
 - **UR-78 [KNOWN]:** The current top-level embedding-health diagnostics can show that the full clustering attempt looked broadly healthy while still failing, which is not enough when the real collapse happened inside a smaller upstream partition or subproblem.
 - **UR-79 [KNOWN]:** When the upstream failure surface permits it, operators need diagnostics for the exact failing partition or subproblem; when it does not, LexonArchiveBuilder should still report the narrowest repository-visible subset it can prove was active at the failing step.
+- **UR-80 [KNOWN]:** We need a tool that, given a block store and a root block, measures the quality and correctness of the resulting block tree.
+- **UR-81 [KNOWN]:** The tool should report structural correctness heuristics such as children always having lower level than their parents.
+- **UR-82 [KNOWN]:** The tool should report embedding-space quality heuristics such as a child's distance-from-centroid spread being the same or smaller than its parent's corresponding spread, so child blocks represent smaller regions than parents.
+- **UR-83 [KNOWN]:** The tool should provide a quantifiable measure of how well the embedding space is divided up, including the shape represented by each block in embedding space.
+- **UR-84 [KNOWN]:** In this increment, the block-tree quality tool should be a CLI-only operator tool.
+- **UR-85 [KNOWN]:** In this increment, the tool should emit both a human-readable summary and a machine-readable JSON artifact.
+- **UR-86 [INFERRED]:** The assessment should operate through the existing `BlockStore` boundary and rooted block graph rather than introducing a second storage abstraction or an MCP-visible quality surface.
+- **UR-87 [INFERRED]:** The assessment must distinguish hard structural-correctness findings from advisory embedding-space quality heuristics so operators can tell invariant violations apart from weaker quality signals.
+- **UR-88 [KNOWN]:** Add an easy CLI tool that accepts a text string and an embedding endpoint, generates an embedding, searches with the `lexongraph-search` API, and returns the top `k` matching leaf nodes.
+- **UR-89 [KNOWN]:** In this increment, the CLI search tool should search a caller-supplied root/tree rather than all searchable content in the configured block store.
+- **UR-90 [KNOWN]:** In this increment, the CLI search tool should emit both human-readable results and machine-readable JSON output.
+- **UR-91 [INFERRED]:** The CLI search tool should remain additive to the existing MCP server search capability rather than replacing or redefining the MCP search surface.
+- **UR-92 [INFERRED]:** The CLI search tool should reuse the existing block-store and rooted-tree boundaries rather than introducing a parallel repository-local search corpus description.
+- **UR-93 [KNOWN]:** The current rooted quality tool's per-pair child-spread warnings are probably false positives, so this heuristic should be reported as an aggregate count rather than as emitted warning findings.
+- **UR-94 [KNOWN]:** The rooted quality tool should compute mean distance from centroid for each block, then report mean and standard deviation by layer as a rough statistical measure of where blocks fit within the embedding space.
+- **UR-95 [KNOWN]:** The rooted quality tool should compute, for every layer, the mean intra-block dispersion and the standard deviation of dispersion across all blocks in that layer so block cohesion and under- or over-splitting become visible.
+- **UR-96 [KNOWN]:** The rooted quality tool should compute, for every layer, the mean centroid-to-centroid distance between sibling blocks and the standard deviation of those distances so block separation and overlapping clusters become visible.
+- **UR-97 [KNOWN]:** For each block, the rooted quality tool should compute the fraction of total variance explained by the first principal component, aggregate that metric by layer using mean and standard deviation, and use it to detect weak or degenerate PCA axes.
+- **UR-98 [KNOWN]:** For each block, the rooted quality tool should measure quantile-bin occupancy counts plus the variance of those occupancies, and detect empty bins plus bins whose occupancy exceeds two times the expected value so quantile failures and misaligned PCA axes become visible.
+- **UR-99 [KNOWN]:** For every parent block and its children, the rooted quality tool should compute the percentage of children whose dispersion exceeds the parent's, the mean increase for such cases, and the maximum observed increase so multimodal parents and ineffective splits become visible.
+- **UR-100 [KNOWN]:** In this increment, the number of quantile bins should remain a repository-defined default rather than an operator-visible parameter.
 
 ## Change Manifest
 
@@ -138,6 +159,11 @@
 | CM-INDEXER-044 | Add | Require failure-only clustering diagnostics that identify the exact failing input set and effective delegated clustering configuration on the runtime log and in a request-adjacent artifact | UR-39, UR-50, UR-72, UR-73, UR-74, UR-75 |
 | CM-INDEXER-045 | Revise | Extend clustering-failure diagnostics with compact embedding-health evidence and a small suspicious-input sample so degenerate-embedding failures become diagnosable without dumping all raw vectors | UR-72, UR-73, UR-74, UR-75, UR-76, UR-77 |
 | CM-INDEXER-046 | Revise | Extend clustering-failure diagnostics to identify the exact failing partition or otherwise the narrowest provable failing subset, so nested upstream subproblem failures become diagnosable instead of only the top-level attempt | UR-72, UR-73, UR-74, UR-75, UR-78, UR-79 |
+| CM-INDEXER-047 | Add | Introduce a rooted block-tree quality assessment tool that traverses a caller-selected root through the existing block-store boundary and reports correctness plus quality findings without changing the MCP surface | UR-80, UR-84, UR-86 |
+| CM-INDEXER-048 | Add | Require the assessment to distinguish structural invariants from embedding-space heuristics and to emit quantitative human-readable plus machine-readable quality evidence for each rooted tree | UR-81, UR-82, UR-83, UR-85, UR-87 |
+| CM-INDEXER-049 | Add | Introduce a CLI-only rooted search tool that embeds caller-provided text through a caller-provided embedding endpoint, searches a caller-selected rooted tree through `lexongraph-search`, and returns the top `k` matching leaf nodes | UR-88, UR-89 |
+| CM-INDEXER-050 | Add | Keep the rooted search tool additive to MCP search while requiring both human-readable and machine-readable result output without introducing a second repository-local search corpus model | UR-90, UR-91, UR-92 |
+| CM-INDEXER-051 | Revise | Refine rooted quality assessment so quality reporting covers tree consistency plus per-layer cohesion, separation, PCA-axis, quantile-occupancy, and parent-child split-effectiveness statistics; parent-versus-child spread inversions become aggregate counts rather than per-pair warnings | UR-82, UR-83, UR-93, UR-94, UR-95, UR-96, UR-97, UR-98, UR-99, UR-100 |
 
 ## Before / After
 
@@ -370,6 +396,31 @@
 
 - **Before [KNOWN]:** The current clustering-failure diagnostics describe the top-level clustering attempt, but they still cannot identify the narrower upstream partition or subproblem that actually triggered a nested rank-collapse failure.
 - **After [KNOWN]:** The requirements now require clustering-failure diagnostics to identify the exact failing partition when the upstream failure surface exposes it, or otherwise the narrowest repository-visible subset LexonArchiveBuilder can prove was active at the failing step.
+
+### BA-INDEXER-047
+
+- **Before [KNOWN]:** The requirements describe runtime progress and failure diagnostics, but they do not yet require any post-index tool that can traverse a rooted stored block tree and assess whether the resulting hierarchy looks structurally correct or spatially well-formed.
+- **After [KNOWN]:** The requirements now introduce a CLI-only rooted block-tree quality assessment tool that reads through the existing `BlockStore` boundary, starts from a caller-supplied root block, and reports structural-correctness plus embedding-space quality findings without changing MCP behavior.
+
+### BA-INDEXER-048
+
+- **Before [KNOWN]:** The requirements do not distinguish between hard block-tree invariant violations and softer heuristics about how well parent and child blocks partition embedding space, nor do they require quantitative reporting of each block's represented shape.
+- **After [KNOWN]:** The requirements now distinguish structural findings from advisory quality heuristics and require both a human-readable summary and a machine-readable JSON artifact containing quantitative evidence about rooted tree quality and each block's represented embedding-space region.
+
+### BA-INDEXER-049
+
+- **Before [KNOWN]:** The requirements preserve existing MCP search behavior for already-indexed content, but they do not require any repository-local CLI surface that lets an operator issue an ad hoc text query directly against a caller-selected rooted tree.
+- **After [KNOWN]:** The requirements now add a CLI-only rooted search tool that embeds caller-provided text through a caller-provided embedding endpoint, searches a caller-selected rooted tree through `lexongraph-search`, and returns the top `k` matching leaf nodes without changing MCP behavior.
+
+### BA-INDEXER-050
+
+- **Before [KNOWN]:** The requirements do not define whether such an operator search tool should emit only terminal-friendly output or also a machine-readable representation, and they do not constrain whether the tool may invent a second repository-local search corpus model.
+- **After [KNOWN]:** The requirements now require rooted CLI search to emit both human-readable and machine-readable results while remaining additive to the existing MCP search surface and reusing the existing rooted-tree plus block-store boundaries.
+
+### BA-INDEXER-051
+
+- **Before [KNOWN]:** The rooted quality requirements treated parent-versus-child centroid-distance spread as advisory per-pair findings, which can overstate problems when the parent is measured over summarized child representatives while the child is measured over its own members, and they did not yet define a fuller per-layer quality model for cohesion, separation, PCA-axis strength, quantile occupancy behavior, or split effectiveness.
+- **After [KNOWN]:** The rooted quality requirements now treat parent-versus-child spread inversions as aggregate heuristic counts only, not emitted warning findings, and require the report to include a refined per-layer quality model covering intra-block dispersion, sibling-centroid separation, PCA-axis strength, quantile-bin occupancy variance, and parent-to-child dispersion deltas, with repository-defined default quantile bins in this increment.
 
 ## Requirements
 
@@ -669,8 +720,9 @@ LexonArchiveBuilder SHALL provide a concrete implementation of `lexongraph_block
 - **Local implementation target [KNOWN]:** The local/testing filesystem-backed realization SHALL use the upstream `lexongraph-block-store-fs` crate rather than a repository-local filesystem naming scheme.
 - **Migration boundary [KNOWN]:** This local filesystem interoperability correction may require a fresh or rebuilt local store; continued read compatibility with blocks written by the superseded custom local layout is not required in this increment.
 - **Artifact reuse [KNOWN]:** The same environment-selected `BlockStore` abstraction family SHALL also be used for normalized email artifacts and mailbox provenance artifacts, provided indexing contracts and retrieval references remain explicit.
+- **Assessment-tool implication [INFERRED]:** Post-index rooted block-tree quality assessment SHALL also read blocks through the same environment-selected `BlockStore` boundary rather than bypassing it with a repository-specific storage reader.
 - **Mailbox retention [KNOWN]:** Mailbox provenance artifacts SHALL be retained so the original source material remains available for re-normalization, re-chunking, and re-ingestion flows.
-- **Traceability:** UR-3, UR-6, UR-9, UR-12, UR-13, UR-18, UR-22, UR-25, UR-26, UR-27, UR-28
+- **Traceability:** UR-3, UR-6, UR-9, UR-12, UR-13, UR-18, UR-22, UR-25, UR-26, UR-27, UR-28, UR-80, UR-86
 
 #### RQ-INDEXER-006 - Embedding provider integration
 
@@ -682,7 +734,8 @@ LexonArchiveBuilder SHALL obtain embeddings through a provider that satisfies `l
 - **Constraint [KNOWN]:** Provider selection varies by environment and must not require changes to the collection-oriented batch contract.
 - **MVP realization [KNOWN]:** The first in-repo implementation must execute end-to-end against a local embedding service. Azure OpenAI remains a required future profile boundary, but not a required executable realization for the first MVP.
 - **Integration note [KNOWN]:** The delegated indexer consumes `EmbeddingInput` and `EmbeddingSpec` through the shared embeddings trait boundary.
-- **Traceability:** UR-7, UR-9, UR-12, UR-13
+- **CLI-search implication [INFERRED]:** Any repository-local rooted search tool that generates query embeddings in this increment must remain compatible with the same OpenAI-compatible embedding boundary family, even if the operator supplies the concrete endpoint at CLI time.
+- **Traceability:** UR-7, UR-9, UR-12, UR-13, UR-88
 
 #### RQ-INDEXER-007 - Environment-specific adapter selection
 
@@ -819,6 +872,91 @@ reconstructable to an operator.
   `--request` file.
 - **Traceability:** UR-39, UR-41, UR-50, UR-72, UR-73, UR-74, UR-75, UR-76, UR-77, UR-78, UR-79
 
+#### RQ-INDEXER-008D - Rooted block-tree quality assessment
+
+LexonArchiveBuilder SHALL provide a rooted block-tree quality assessment tool
+that reads a caller-selected root block from the configured block store and
+reports structural-correctness and embedding-space quality findings for the
+reachable tree.
+
+- **Invocation scope [KNOWN]:** The assessment takes a configured block store and
+  a caller-supplied root block identifier, then traverses the reachable block
+  tree rooted at that block rather than depending on a repository-local summary
+  manifest or out-of-band tree description.
+- **Surface [KNOWN]:** In this increment, the assessment is a CLI-only operator
+  tool and SHALL NOT require MCP exposure.
+- **Structural-correctness findings [KNOWN]:** The assessment must identify and
+  report hard structural violations such as any reachable child whose level is
+  not lower than its parent.
+- **Embedding-space heuristic findings [KNOWN]:** The assessment must report
+  quantitative heuristics about how the tree partitions embedding space,
+  including whether a child's centroid-distance spread is less than or equal to
+  its parent's corresponding spread so child blocks represent the same or a
+  smaller region than their parents, but this heuristic SHALL be reported as an
+  aggregate inversion count rather than as emitted per-pair warning findings.
+- **Quantification requirement [KNOWN]:** The assessment must emit quantitative
+  per-block and aggregate evidence characterizing the size or shape of the
+  embedding-space region represented by each block and by the rooted tree as a
+  whole. That evidence SHALL include:
+  - per-block mean distance from centroid
+  - per-layer mean and standard deviation of intra-block dispersion
+  - per-layer mean and standard deviation of sibling centroid-to-centroid distance
+  - per-block first-principal-component variance fraction plus per-layer mean and standard deviation of that metric
+  - per-block quantile-bin occupancy counts, occupancy variance, empty-bin detection, and detection of bins whose occupancy exceeds two times the expected value
+  - per-parent split-effectiveness statistics covering the percentage of children whose dispersion exceeds the parent's plus the mean and maximum increase for those cases
+- **Severity discipline [INFERRED]:** Structural-correctness violations and
+  advisory embedding-space statistics SHALL be reported distinctly so callers
+  can separate hard invariant failures from softer quality signals, and the
+  parent-versus-child spread heuristic count SHALL remain advisory-only in this
+  increment rather than producing per-block warning records.
+- **Quantile-bin boundary [KNOWN]:** The number of quantile bins SHALL remain a
+  repository-defined default in this increment rather than an operator-visible
+  parameter.
+- **Output requirement [KNOWN]:** The assessment must emit a human-readable
+  summary and a machine-readable JSON artifact for the same analyzed rooted
+  tree.
+- **Environment parity [INFERRED]:** The same assessment contract must remain
+  usable against local/testing and preserved production-shaped block stores
+  through the shared `BlockStore` boundary.
+- **Content-type neutrality [INFERRED]:** The assessment must operate on stored
+  block relationships and embeddings without assuming mailbox-only or
+  document-only content semantics, so future content types remain representable.
+- **Boundary [INFERRED]:** This requirement adds post-index assessment only; it
+  does not redefine LexonGraph block validity semantics, change indexing-time
+  construction behavior, or alter MCP search-serving behavior.
+- **Traceability:** UR-80, UR-81, UR-82, UR-83, UR-84, UR-85, UR-86, UR-87
+
+#### RQ-INDEXER-008E - Rooted CLI search over stored trees
+
+LexonArchiveBuilder SHALL provide a CLI-only operator tool that accepts a text
+query, a caller-supplied embedding endpoint, a caller-supplied rooted tree, and
+`k`, then generates a query embedding and searches the rooted stored tree
+through `lexongraph-search` to return the top `k` matching leaf nodes.
+
+- **Invocation scope [KNOWN]:** The search runs against a caller-supplied root
+  block or rooted tree rather than against all searchable content visible in the
+  configured block store.
+- **Search boundary [KNOWN]:** The tool SHALL use the `lexongraph-search` API for
+  the actual rooted search rather than introducing a repository-local search
+  algorithm.
+- **Embedding boundary [KNOWN]:** The tool SHALL accept a caller-supplied
+  embedding endpoint for query embedding generation rather than requiring Rust
+  code changes for each endpoint choice.
+- **Result shape [KNOWN]:** The tool must return the top `k` matching leaf nodes
+  for the rooted search invocation.
+- **Output requirement [KNOWN]:** The tool must emit both human-readable results
+  and machine-readable JSON output for the same invocation.
+- **Surface boundary [INFERRED]:** The tool is additive to the existing MCP
+  search capability and SHALL NOT replace or redefine the MCP search surface in
+  this increment.
+- **Storage boundary [INFERRED]:** The tool must reuse the configured block-store
+  plus rooted-tree boundaries rather than inventing a second repository-local
+  search corpus description.
+- **Content-type neutrality [INFERRED]:** The tool must operate on searchable leaf
+  nodes reachable from the rooted tree without assuming mailbox-only or
+  document-only content semantics.
+- **Traceability:** UR-88, UR-89, UR-90, UR-91, UR-92
+
 ### Boundary and Invariant Requirements
 
 #### RQ-INDEXER-009 - Search-serving separation
@@ -874,6 +1012,10 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 - Introducing a repository-local per-run clustering manifest or a repository-local block-classification scheme outside the upstream LexonGraph block-iteration contract
 - Defining repository-local clustering algorithms or option semantics beyond the supported built-in upstream clustering choices used in this increment
 - Requiring detailed clustering-input inventories for successful clustering runs in this increment
+- Requiring the block-tree quality assessment tool to expose an MCP-visible interface in this increment
+- Reinterpreting advisory embedding-space quality heuristics as new LexonGraph-owned block-validity rules in this increment
+- Requiring the rooted CLI search tool to replace or redefine the existing MCP search surface in this increment
+- Defining a repository-local search algorithm or a second repository-local search corpus model instead of using `lexongraph-search` over the approved rooted-tree boundary
 
 ## Invariant Impact Assessment
 
@@ -891,6 +1033,8 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 | Required repository capabilities remain distinguishable from upstream regressions during the latest upgrade | Preserved with clarified scope | The requirements now force the upgrade to classify missing capabilities explicitly instead of silently narrowing split-stage replay, planning-policy mapping, progress projection, or MCP-facing behavior |
 | Latest upstream telemetry remains subordinate to the existing runtime progress surface | Preserved with clarified scope | Requirements now constrain richer live telemetry and heartbeat events to the same repository-owned log stream rather than a new telemetry interface |
 | Operator-visible progress counts remain understandable across upstream telemetry changes | Preserved with clarified scope | Requirements now distinguish invocation-total delegated-item counts from stage-local or layer-local telemetry counts so upstream count-shape changes do not create misleading logs |
+| Post-index quality assessment remains subordinate to existing storage and serving boundaries | Preserved with clarified scope | The new assessment is constrained to a CLI-only operator tool that reads through the shared `BlockStore` boundary and does not alter MCP-facing behavior |
+| Operator CLI search remains additive to MCP search-serving behavior | Preserved with clarified scope | The new rooted CLI search tool is additive, uses the approved rooted-tree boundary plus `lexongraph-search`, and does not replace the MCP surface |
 | Clients are not forced to parse raw mailbox blobs for ordinary retrieval | Preserved | Indexed chunks must reference normalized email artifacts so retrieval can stay at chunk level or expand to full normalized email through repository-owned artifacts |
 | Storage abstraction count stays bounded across environments | Preserved | Requirements now reuse the environment-selected `BlockStore` abstraction family for indexed blocks, normalized email artifacts, and mailbox provenance artifacts rather than introducing a second storage stack |
 | Local filesystem block stores remain interoperable with LexonGraph tooling | Preserved | The local/testing profile is now constrained to LexonGraph's filesystem naming/layout contract so inspection tools can consume repository-produced local stores |
@@ -902,10 +1046,69 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 - **Q-INDEXER-062 [UNKNOWN]:** Does the latest upstream status-observer contract expose enough information for LexonArchiveBuilder to preserve its current replay-submission handoff and long-running liveness messages without weakening operator visibility?
 - **Q-INDEXER-063 [UNKNOWN]:** Are any repository-required split-stage replay guarantees now expressed through different upstream lifecycle transitions beyond the observed rename from training completion to planning completion?
 - **Q-INDEXER-064 [UNKNOWN]:** Does the newest upstream telemetry contract intend `item_count` to remain invocation-total for planning-pass events while hierarchy-planning and bottom-up assembly events report stage-local or layer-local progress units, or is that count shape still evolving?
+- **Q-INDEXER-065 [UNKNOWN]:** After the approved intra-block dispersion, sibling-centroid separation, PCA-axis strength, quantile-occupancy, and parent-child dispersion-delta metrics land, which additional quantitative embedding-space shape measures would improve the rooted quality signal in a future increment without overfitting too early?
+- **Q-INDEXER-066 [UNKNOWN]:** Future increments may revisit whether any rooted-quality heuristics beyond hard structural violations should influence process exit status, but this increment keeps the heuristic inversion count and layer statistics advisory-only.
+- **Q-INDEXER-067 [UNKNOWN]:** Beyond the required query text, embedding endpoint, root, and `k`, does the rooted CLI search tool need repository-approved filters, score thresholds, or output-field selection in this increment?
+- **Q-INDEXER-068 [UNKNOWN]:** Should the rooted CLI search tool treat the caller-supplied embedding endpoint as the complete query-embedding configuration, or must it also accept repository-specific embedding-spec inputs such as dimensions or encoding overrides at the CLI boundary?
 
 ## Coverage Notes
 
 - **Covered sources [KNOWN]:**
+  - user request in this session: "another requirement: Add an option to allow the user to provide a text string and an embedding endpoint, then generate an embedding, search using the lexongraph-search api, and return the top k matching leaf nodes. The MCP server already does something similar, but I want an easy cli tool to do it as well"
+  - user clarification in this session selecting: "Caller-supplied root/tree (Recommended)"
+  - user clarification in this session selecting: "Human-readable results plus machine-readable JSON output (Recommended)"
+  - user request in this session: "We need a tool that given a block store and root and measure the quality / correctness of the block tree. This would include heuristics like children always have lower level than parents. Distance from centroid of embeddings in parent is the same or bigger than distance from centroid if embeddings in child (i.e. children span a smaller part of the embedding space than their parents). It would also be useful to gain a quantifiable measure of the quality of how the space is divided up (i.e. the shape that each block represents in teh embedding space)."
+  - user clarification in this session selecting: "CLI-only operator tool (Recommended)"
+  - user clarification in this session selecting: "Human-readable summary plus machine-readable JSON artifact (Recommended)"
+  - user request in this session: "yes, that warning is probably a false positive. Report as a count, but don't issue warnings. Can we instead compute mean distance from centroid for each block, then compute mean by layer and stdev by layer? i.e. a rough statistical measure of the where the blocks fit within the embedding space?"
+  - user request in this session: "I think we need to refine what we are measuring as quality. It should include tree consistency (like we already have) but also:
+1. Intra‑Block Dispersion Statistics (Per Layer)
+The system SHALL compute, for every layer of the tree:  
+- the mean intra‑block dispersion (mean distance of embeddings to their block centroid), and  
+- the standard deviation of dispersion across all blocks in that layer.  
+ 
+These values SHALL be used to assess block cohesion and detect under‑ or over‑splitting.
+ 
+---
+ 
+2. Inter‑Centroid Distance Statistics (Per Layer)
+The system SHALL compute, for every layer:  
+- the mean centroid‑to‑centroid distance between sibling blocks, and  
+- the standard deviation of these distances.  
+ 
+These values SHALL be used to assess block separation and detect overlapping or poorly differentiated clusters.
+ 
+---
+ 
+3. PCA Axis Strength (Per Layer)
+For each block at each layer, the system SHALL compute:  
+- the fraction of total variance explained by the first principal component (λ₁ / Σλᵢ).  
+ 
+This metric SHALL be aggregated per layer (mean and stdev) and SHALL be used to detect weak or degenerate PCA axes.
+ 
+---
+ 
+4. Quantile Bin Occupancy Variance (Per Layer)
+For each block, the system SHALL measure:  
+- the occupancy count of each quantile bin, and  
+- the variance of these occupancies.  
+ 
+The system SHALL detect and record:  
+- empty bins, and  
+- bins with occupancy greater than 2× the expected value.  
+ 
+This metric SHALL be used to detect quantile failures and misaligned PCA axes.
+ 
+---
+ 
+5. Parent‑to‑Child Dispersion Delta (Per Split)
+For every parent block and its children, the system SHALL compute:  
+- the percentage of children whose dispersion exceeds that of the parent,  
+- the mean increase in dispersion for such cases, and  
+- the maximum observed increase.  
+ 
+This metric SHALL be used to detect multimodal blocks and ineffective splits."
+  - user clarification in this session selecting: "Repository-defined default (Recommended)"
   - user request in this session: "update the LexonGraph rust crates. The latest version contains a significant api change. Rebuild the indexer code to use the new LexonGraph streaming indexer. Maintain other invariants, update tests. When done, branch, commit, push, pr"
   - user request in this session: "adapt implementation to latest lexongraph version and tell me if lexongraph regressed features we need so I can fix it."
   - user clarification in this session selecting: "Preserve the current external stage contract (Recommended)"
@@ -991,3 +1194,5 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
   - The exact configuration surface for the administrator-defined concurrency cap and the exact physical-CPU detection algorithm in containerized or quota-constrained environments, because those belong to downstream design and validation artifacts rather than requirements
   - The precise block-kind predicate used inside the upstream LexonGraph block-iteration API to determine clustering eligibility, because this requirements document constrains LexonArchiveBuilder to the upstream iteration contract without redefining LexonGraph-owned block semantics
   - The exact default clustering algorithm, exact default numeric option values, and whether clustering-option parity with `BatchRequest` is required in this increment, because those choices can be finalized in downstream design and validation artifacts so long as they stay within the approved command-line and determinism constraints
+  - The exact formulas, thresholds, weighting model, and exit-code policy for quantitative block-tree quality heuristics, because those choices belong to downstream design and validation artifacts so long as the approved distinction between hard structural findings and advisory quality evidence is preserved
+  - The exact rooted CLI search flag names, result-field schema, score formatting, and default artifact location, because those choices belong to downstream design and validation artifacts so long as the approved rooted search scope, `lexongraph-search` boundary, and dual-output contract are preserved

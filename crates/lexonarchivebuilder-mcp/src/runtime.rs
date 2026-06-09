@@ -2,18 +2,21 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ciborium::Value;
 use lexonarchivebuilder_indexer::BatchSummary;
 use lexonarchivebuilder_indexer::INGESTION_ONLY_ROOT_ID_PLACEHOLDER;
 use lexonarchivebuilder_indexer::block_store::ConfiguredBlockStore;
 use lexonarchivebuilder_indexer::config::ConfigError as IndexerConfigError;
 use lexonarchivebuilder_indexer::embedding::ConfiguredEmbeddingProvider;
+use lexonarchivebuilder_indexer::tree_tools::{
+    metadata_values_to_text_map, parse_block_hash, search_with_partial_retry,
+    source_name_from_metadata,
+};
 use lexongraph_block::{BlockHash, EmbeddingSpec};
 use lexongraph_block_store::BlockStoreError;
 use lexongraph_embeddings_trait::{EmbeddingInput, EmbeddingProvider};
 use lexongraph_search::{
     DefaultCandidateScorer, DefaultEmbeddingCompatibility, EncodedTargetEmbedding, SearchError,
-    SearchResult, Searcher,
+    Searcher,
 };
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
@@ -209,7 +212,7 @@ impl McpRuntime {
                 .leaves
                 .into_iter()
                 .map(|leaf| {
-                    let metadata = metadata_to_text_map(&leaf.entry.metadata);
+                    let metadata = metadata_values_to_text_map(&leaf.entry.metadata);
                     SearchChunkHit {
                         position: leaf.position,
                         leaf_block_id: leaf.leaf_block_id.to_string(),
@@ -268,77 +271,12 @@ impl McpRuntime {
     }
 }
 
-fn search_with_partial_retry(
-    searcher: &Searcher<DefaultEmbeddingCompatibility, DefaultCandidateScorer>,
-    root_id: &BlockHash,
-    target: &EncodedTargetEmbedding,
-    traversal_width: usize,
-    top_k: usize,
-    store: &dyn lexongraph_block_store::BlockStore,
-) -> Result<SearchResult, SearchError> {
-    match searcher.search(root_id, target, traversal_width, top_k, store) {
-        Ok(result) => Ok(result),
-        Err(SearchError::Exhausted {
-            reachable_leaves, ..
-        }) if reachable_leaves > 0 => {
-            searcher.search(root_id, target, traversal_width, reachable_leaves, store)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn metadata_to_text_map(metadata: &[(Value, Value)]) -> BTreeMap<String, String> {
-    metadata
-        .iter()
-        .filter_map(|(key, value)| match (key, value) {
-            (Value::Text(key), Value::Text(value)) => Some((key.clone(), value.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-fn source_name_from_metadata(metadata: &BTreeMap<String, String>) -> Option<String> {
-    [
-        "source_name",
-        "document_name",
-        "email_name",
-        "thread_name",
-        "name",
-    ]
-    .iter()
-    .find_map(|key| metadata.get(*key).cloned())
-}
-
 fn unsupported_named_retrieval(kind: NamedItemKind, name: String) -> NamedRetrievalResponse {
     NamedRetrievalResponse {
         kind,
         name,
         status: NamedRetrievalStatus::Unsupported,
         message: "Named retrieval remains unavailable in the first MVP because the delegated LexonGraph retrieval-by-name contract is not yet implemented.".into(),
-    }
-}
-
-fn parse_block_hash(value: &str) -> Result<BlockHash, ()> {
-    if value.len() != BlockHash::LEN * 2 {
-        return Err(());
-    }
-
-    let mut bytes = [0u8; BlockHash::LEN];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = decode_hex_nibble(chunk[0])?;
-        let low = decode_hex_nibble(chunk[1])?;
-        bytes[index] = (high << 4) | low;
-    }
-
-    Ok(BlockHash::from_bytes(bytes))
-}
-
-fn decode_hex_nibble(byte: u8) -> Result<u8, ()> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(()),
     }
 }
 

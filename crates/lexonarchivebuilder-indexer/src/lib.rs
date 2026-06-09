@@ -3,8 +3,11 @@ pub mod config;
 pub mod embedding;
 pub mod mailbox;
 mod paths;
+pub mod quality;
 pub mod resolver;
 pub mod runtime;
+pub mod search;
+pub mod tree_tools;
 
 pub use config::{
     BatchRequest, BatchSummary, ClusteringAlgorithm, ClusteringConfigOverrides, ExecutionStage,

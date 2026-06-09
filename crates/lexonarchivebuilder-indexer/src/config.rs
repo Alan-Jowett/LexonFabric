@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::paths::resolve_path;
 use crate::resolver::ContentRef;
+use crate::tree_tools::metadata_values_to_text_map;
 
 const DEFAULT_BLOCK_SIZE_TARGET: usize = 65_536;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -572,13 +573,7 @@ pub(crate) fn metadata_to_lexongraph(
 }
 
 pub(crate) fn metadata_to_text_map(metadata: &Metadata) -> BTreeMap<String, String> {
-    metadata
-        .iter()
-        .filter_map(|(key, value)| match (key, value) {
-            (Value::Text(key), Value::Text(value)) => Some((key.clone(), value.clone())),
-            _ => None,
-        })
-        .collect()
+    metadata_values_to_text_map(metadata)
 }
 
 fn default_block_size_target() -> usize {

@@ -8,7 +8,8 @@ streaming delegated indexing, stage-selectable execution, standalone
 clustering input discovery, clustering-algorithm selection, clustering-option
 exposure, latest planning-policy and telemetry compatibility, upstream
 regression assessment, replay-submission and streaming-status observability,
-clustering-failure diagnostics, replay-stable fingerprinting, and
+clustering-failure diagnostics, rooted block-tree quality assessment,
+rooted CLI search over stored trees, replay-stable fingerprinting, and
 layer-parallel block-construction evolution in
 `docs/specs/lexonarchivebuilder-indexer/requirements.md`.
 
@@ -25,9 +26,9 @@ planning-policy and telemetry compatibility, upstream regression
 assessment, embedding-phase batch-progress observability,
 replay-submission observability, streaming-status observability,
 telemetry-count-semantics clarity, clustering-failure diagnostics,
-replay-stable delegated item
-identity, and layer-parallel delegated block construction for the
-local/testing profile.
+rooted block-tree quality assessment, rooted CLI search over stored trees,
+replay-stable delegated item identity, and layer-parallel delegated block
+construction for the local/testing profile.
 
 This document is layered on top of:
 
@@ -62,6 +63,10 @@ owned by LexonGraph and its subordinate crates.
   the architecture level
 - Rust implementation, configuration, and test artifacts that realize the
   approved MVP slice in this repository
+- CLI parsing, report rendering, and JSON artifact generation for the rooted
+  block-tree quality tool
+- CLI parsing, query embedding generation, search execution, and result
+  rendering for the rooted CLI search tool
 - Docker Compose, container, and local test-environment artifacts that realize
   the approved MVP slice
 
@@ -70,6 +75,8 @@ owned by LexonGraph and its subordinate crates.
 - MCP server search semantics
 - LexonGraph indexing internals
 - LexonGraph block encoding and block identity contracts
+- LexonGraph-owned block validity semantics beyond the repository-owned
+  assessment heuristics and structural checks added in this increment
 - document-specific normalization and chunking policy details beyond preserving
   a future extension seam
 
@@ -92,6 +99,11 @@ The LexonArchiveBuilder indexer design is intended to be:
 - observable during long-running mailbox batches, local embedding work,
   clustering-only replay submission, streaming final materialization or
   block-assembly work, and delegated clustering failures
+- able to assess the post-index quality of a rooted stored block tree without
+  introducing a second storage abstraction or an MCP-visible operator surface
+- able to execute ad hoc rooted CLI search over stored trees without
+  redefining MCP search-serving behavior or introducing a second search corpus
+  model
 - chunk-first for email retrieval while preserving full-message and source
   provenance artifacts
 
@@ -535,6 +547,65 @@ clustering failure so diagnosability does not depend on artifact persistence.
 **Traces to:** RQ-INDEXER-003E, RQ-INDEXER-003F, RQ-INDEXER-008C,
 RQ-INDEXER-010
 
+### DSG-LFI-002D `Rooted block-tree quality reporting`
+
+LexonArchiveBuilder realizes post-index block-tree assessment as one CLI-only
+operator flow that starts from a caller-supplied root block identifier, walks
+the reachable tree through the configured `BlockStore`, and emits one
+human-readable summary plus one machine-readable JSON report for that rooted
+snapshot.
+
+The reporting flow separates findings into two repository-owned classes:
+
+- structural-correctness findings for hard tree-shape violations such as a
+  reachable child whose level is not lower than its parent
+- embedding-space quality findings for advisory heuristics about how well parent
+  and child blocks partition the represented embedding region
+
+The report contains both aggregate rooted-tree evidence and per-block evidence.
+That evidence includes quantitative shape or spread measurements, but the
+design intentionally does not freeze one metric family in the specification
+layer while `Q-INDEXER-065` remains open. The fixed design boundary is that the
+same metric outputs appear in the human-readable summary and JSON artifact with
+severity labeling that distinguishes hard structural failures from advisory
+quality warnings.
+
+One required repository-owned heuristic in this increment compares a child's
+centroid-distance spread against its parent's corresponding spread. The design
+therefore requires the report to preserve enough parent-and-child quantitative
+evidence to determine whether each child represents the same or a smaller
+embedding-space region than its parent under that centroid-distance comparison,
+rather than collapsing all quality reporting into aggregate-only spread
+statistics.
+
+This flow is post-index analysis only. It does not change delegated index
+construction behavior, redefine LexonGraph validity rules, or introduce an
+MCP-visible diagnostics surface.
+
+**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-009, RQ-INDEXER-010
+
+### DSG-LFI-002E `Rooted CLI search flow`
+
+LexonArchiveBuilder realizes rooted operator search as one CLI-only flow that:
+
+1. accepts one caller-provided text query
+2. generates one query embedding through a caller-provided embedding endpoint
+3. searches one caller-supplied rooted tree through `lexongraph-search`
+4. returns the top `k` matching leaf nodes
+5. renders one human-readable result summary plus one machine-readable JSON
+   result artifact for the same invocation
+
+This flow is additive to the existing MCP server search capability. It exists
+for operator convenience and automation over an already-persisted rooted tree;
+it does not change the MCP request surface, query semantics, or retrieval
+contract.
+
+The design keeps the search algorithm subordinate to `lexongraph-search`.
+LexonArchiveBuilder owns CLI orchestration, rooted invocation shaping, output
+rendering, and boundary adaptation only.
+
+**Traces to:** RQ-INDEXER-008E, RQ-INDEXER-009, RQ-INDEXER-010A
+
 ### DSG-LFI-003 `Collection item normalization`
 
 LexonArchiveBuilder models each batch element as an application-owned indexing item that
@@ -755,6 +826,41 @@ reads from the old layout.
 
 **Traces to:** RQ-INDEXER-005, RQ-INDEXER-010B
 
+### DSG-LFI-005B `Rooted assessment traversal through BlockStore`
+
+The rooted block-tree quality tool traverses stored tree structure exclusively
+through the same environment-selected `BlockStore` abstraction family used by
+the indexing pipeline.
+
+The assessment reads the caller-selected root block through that boundary,
+discovers reachable descendants by following stored parent-child references, and
+limits all findings and aggregates to the reachable rooted snapshot rather than
+to every block present in the store.
+
+This design keeps assessment logic backend-neutral across local filesystem and
+the preserved production storage profile. It also prevents the repository from
+introducing a second storage-reader stack with different reachability or
+decoding semantics than the indexing path already uses.
+
+**Traces to:** RQ-INDEXER-005, RQ-INDEXER-008D, RQ-INDEXER-010
+
+### DSG-LFI-005C `Rooted search boundary through BlockStore`
+
+The rooted CLI search tool scopes search to one caller-supplied root block and
+the reachable rooted tree under that block through the same configured
+`BlockStore` abstraction family used by the indexing pipeline.
+
+LexonArchiveBuilder therefore does not construct a second repository-local
+search corpus description or a parallel manifest of searchable nodes. The
+reachable rooted tree is the authority for which stored leaf nodes may appear in
+search results for one invocation.
+
+This preserves backend-neutral search orchestration across local filesystem and
+the preserved production storage profile while keeping traversal semantics
+aligned with the same stored tree boundary used by rooted quality assessment.
+
+**Traces to:** RQ-INDEXER-005, RQ-INDEXER-008E, RQ-INDEXER-010
+
 ### DSG-LFI-006 `Embedding provider adapter boundary`
 
 LexonArchiveBuilder provides environment-selected implementations or adapters that
@@ -776,6 +882,21 @@ and configuration target rather than an implemented runtime path in this
 increment.
 
 **Traces to:** RQ-INDEXER-006, RQ-INDEXER-007, RQ-INDEXER-010
+
+### DSG-LFI-006A `Query embedding generation boundary`
+
+For rooted CLI search, LexonArchiveBuilder generates the query embedding through
+one caller-provided embedding endpoint that remains compatible with the same
+OpenAI-compatible embedding boundary family used elsewhere in the repository.
+
+This design keeps endpoint selection operator-driven at CLI time without
+requiring Rust code edits for each query target. The specification layer does
+not require the CLI to expose every possible embedding-spec override while
+`Q-INDEXER-068` remains open; the fixed boundary is that query-embedding
+generation stays subordinate to the repository's existing embedding-provider
+family rather than inventing a search-only embedding protocol.
+
+**Traces to:** RQ-INDEXER-006, RQ-INDEXER-008E, RQ-INDEXER-010
 
 ## Environment Design
 
@@ -878,14 +999,62 @@ increment explicitly adds persistent clustering-configuration fields there.
 **Traces to:** RQ-INDEXER-003F, RQ-INDEXER-003G, RQ-INDEXER-007,
 RQ-INDEXER-010
 
+### DSG-LFI-007D `Block-tree quality CLI surface`
+
+LexonArchiveBuilder exposes the rooted block-tree quality assessment through a
+dedicated CLI-only operator surface that accepts:
+
+- the same environment-selected block-store configuration family used by the
+  indexer runtime
+- one root block identifier to analyze
+- one optional artifact destination for the JSON report when the default output
+  location is insufficient
+
+The CLI surface is intentionally separate from the batch `run` request-file
+contract because the assessment analyzes an already-persisted rooted tree rather
+than orchestrating a new indexing batch. The design does not require MCP
+exposure, request-file integration, or a long-lived reporting service in this
+increment.
+
+The CLI renders a concise human-readable summary to the operator-facing output
+stream and writes the full machine-readable report artifact for downstream
+automation or offline analysis.
+
+**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-009
+
+### DSG-LFI-007E `Rooted CLI search surface`
+
+LexonArchiveBuilder exposes the rooted CLI search capability through a dedicated
+operator surface that accepts:
+
+- one query text string
+- one caller-provided embedding endpoint
+- one caller-provided root block identifier
+- one `k` value for the number of matching leaf nodes to return
+- one optional artifact destination when the default JSON output location is
+  insufficient
+
+The CLI surface is intentionally separate from the batch `run` request-file
+contract because the tool operates on an already-persisted rooted tree rather
+than orchestrating a new indexing batch. The design does not require MCP
+exposure or request-file integration in this increment.
+
+The CLI renders one concise human-readable result set for immediate operator use
+and writes the full machine-readable JSON result output for downstream
+automation.
+
+**Traces to:** RQ-INDEXER-008E, RQ-INDEXER-009
+
 ### DSG-LFI-008 `Local and production parity boundary`
 
 Local/testing and production environments differ only in adapter realization and
 provider configuration, not in the container's batch contract, the staged email
 artifact model, content item shape, the stage-selection and concurrency-
 configuration surfaces, the clustering-selection and clustering-option CLI
-surface, or the delegated `lexongraph-streaming-indexer`
-orchestration contract.
+surface, the rooted block-tree quality CLI surface, or the delegated
+`lexongraph-streaming-indexer` orchestration contract. The same parity boundary
+also covers the rooted CLI search surface's use of configured storage plus one
+operator-supplied embedding endpoint.
 
 The MVP realizes this parity boundary by keeping the core orchestration and item
 model environment-neutral even though only the local/testing profile executes in
@@ -904,6 +1073,14 @@ RQ-INDEXER-003E, RQ-INDEXER-003G
 The indexer package remains separate from MCP server search semantics. No design
 element in this package changes retrieval contracts, query semantics, or search
 ranking behavior.
+
+That separation includes the rooted block-tree quality tool: it remains a CLI
+operator capability and does not become an MCP query, retrieval, or reporting
+surface in this increment.
+
+The same separation applies to the rooted CLI search tool: it remains additive
+to MCP search and does not become the new definition of repository search
+semantics.
 
 **Traces to:** RQ-INDEXER-009
 
@@ -937,8 +1114,20 @@ repeating a clustering-enabled run with the same explicit flags or the same
 omitted-option defaulting path must resolve to the same effective upstream
 clustering algorithm and option values.
 
+For rooted block-tree quality assessment, the comparable invariant is rooted
+snapshot determinism: repeated assessment over the same reachable rooted block
+tree and the same quantitative metric configuration is expected to produce the
+same structural findings and the same quantitative quality evidence.
+
+For rooted CLI search, the comparable invariant is rooted-query determinism:
+repeating the same query text, rooted tree, embedding endpoint behavior, and
+`k` against the same stored snapshot is expected to produce the same ranked leaf
+result set under unchanged subordinate `lexongraph-search` semantics.
+
 **Traces to:** RQ-INDEXER-003B, RQ-INDEXER-003C, RQ-INDEXER-008,
-RQ-INDEXER-003E, RQ-INDEXER-003F, RQ-INDEXER-003G, RQ-INDEXER-010A
+RQ-INDEXER-003E, RQ-INDEXER-003F, RQ-INDEXER-003G, RQ-INDEXER-008D,
+RQ-INDEXER-008E,
+RQ-INDEXER-010A
 
 ## Verification Realization
 
@@ -969,6 +1158,13 @@ LexonArchiveBuilder-owned verification artifacts validate:
 - correct failure-only clustering diagnostics that identify the failed input
   set and effective delegated clustering configuration on both required
   surfaces
+- correct rooted block-tree quality assessment over the shared `BlockStore`
+  boundary, including separation of structural findings from advisory
+  embedding-space heuristics and emission of both required output surfaces
+- correct rooted CLI search over the shared `BlockStore` boundary, including
+  query embedding generation through the approved endpoint family, subordinate
+  use of `lexongraph-search`, rooted result scoping, and emission of both
+  required output surfaces
 - correct application and defaulting of the administrator-defined concurrency
   budget
 - preservation of stable batch contracts across environments
@@ -983,8 +1179,10 @@ LexonArchiveBuilder consumes them correctly.
 **Traces to:** RQ-INDEXER-003A, RQ-INDEXER-003B, RQ-INDEXER-003C,
 RQ-INDEXER-003D, RQ-INDEXER-003E, RQ-INDEXER-003F, RQ-INDEXER-003G,
 RQ-INDEXER-004F, RQ-INDEXER-008A, RQ-INDEXER-008B, RQ-INDEXER-008C,
+RQ-INDEXER-008D, RQ-INDEXER-008E,
 RQ-INDEXER-010A, RQ-INDEXER-010B, RQ-INDEXER-010, DSG-LFI-001A,
 DSG-LFI-001B, DSG-LFI-001C, DSG-LFI-001D, DSG-LFI-001E, DSG-LFI-001F,
 DSG-LFI-001G, DSG-LFI-001H, DSG-LFI-001I, DSG-LFI-002A, DSG-LFI-002B,
-DSG-LFI-002C, DSG-LFI-004G, DSG-LFI-005A, DSG-LFI-007A, DSG-LFI-007B,
-DSG-LFI-007C
+DSG-LFI-002C, DSG-LFI-002D, DSG-LFI-004G, DSG-LFI-005A, DSG-LFI-005B,
+DSG-LFI-005C, DSG-LFI-006A, DSG-LFI-007A, DSG-LFI-007B, DSG-LFI-007C,
+DSG-LFI-007D, DSG-LFI-007E

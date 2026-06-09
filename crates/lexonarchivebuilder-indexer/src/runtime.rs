@@ -27,9 +27,8 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior, interval_at};
 
 use crate::block_store::ConfiguredBlockStore;
 use crate::config::{
-    AdaptiveTieBreak, BatchItemConfig, BatchRequest, BatchSummary, ClusteringConfigOverrides,
-    ClusteringMode, ClusteringProvider, ConfigError, ConfiguredClustering, ExecutionStage,
-    metadata_to_text_map,
+    BatchItemConfig, BatchRequest, BatchSummary, ClusteringConfigOverrides, ClusteringMode,
+    ClusteringProvider, ConfigError, ConfiguredClustering, ExecutionStage, metadata_to_text_map,
 };
 use crate::embedding::{ConfiguredEmbeddingProvider, ConfiguredEmbeddingProviderError};
 use crate::mailbox::{MailboxExpansionError, expand_mailbox_item_with_stats};
@@ -115,7 +114,7 @@ enum EffectiveClusteringDiagnostics {
         min_effective_rank: usize,
         min_cumulative_variance: f32,
         balance_constraints: Option<BalanceConstraintsDiagnostics>,
-        adaptive_tie_break: AdaptiveTieBreak,
+        mean_cluster_radius_threshold: f32,
     },
 }
 
@@ -631,7 +630,7 @@ fn resolved_built_in_planning(
             random_seed,
             balance_constraints,
             params,
-            tie_break,
+            mean_cluster_radius_threshold,
         } => {
             if *provider != ClusteringProvider::BuiltIn {
                 return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(
@@ -663,9 +662,7 @@ fn resolved_built_in_planning(
                     random_seed: *random_seed,
                 },
                 switch_criteria: AdaptiveSwitchCriteria {
-                    min_effective_rank: params.min_effective_rank,
-                    min_cumulative_variance: params.min_cumulative_variance,
-                    tie_break: tie_break.to_upstream(),
+                    mean_cluster_radius_threshold: *mean_cluster_radius_threshold,
                 },
             })
         }
@@ -848,12 +845,18 @@ fn effective_clustering_diagnostics(
                     },
                     cluster_count: settings.directional_pca.cluster_count,
                     random_seed: settings.directional_pca.random_seed,
-                    retained_dimension_count: settings.directional_pca.params.retained_dimension_count,
+                    retained_dimension_count: settings
+                        .directional_pca
+                        .params
+                        .retained_dimension_count,
                     variance_exponent: settings.directional_pca.params.variance_exponent,
                     temperature: settings.directional_pca.params.temperature,
                     min_input_count: settings.directional_pca.params.min_input_count,
-                    min_effective_rank: settings.switch_criteria.min_effective_rank,
-                    min_cumulative_variance: settings.switch_criteria.min_cumulative_variance,
+                    min_effective_rank: settings.directional_pca.params.min_effective_rank,
+                    min_cumulative_variance: settings
+                        .directional_pca
+                        .params
+                        .min_cumulative_variance,
                     balance_constraints: settings.dcbc.balance_constraints.map(|constraints| {
                         BalanceConstraintsDiagnostics {
                             min_cluster_occupancy: constraints.min_cluster_occupancy,
@@ -862,14 +865,9 @@ fn effective_clustering_diagnostics(
                             soft_balance_penalty: constraints.soft_balance_penalty,
                         }
                     }),
-                    adaptive_tie_break: match settings.switch_criteria.tie_break {
-                        lexongraph_streaming_indexer::AdaptiveSwitchTieBreak::PreferDirectionalPca => {
-                            AdaptiveTieBreak::PreferDirectionalPca
-                        }
-                        lexongraph_streaming_indexer::AdaptiveSwitchTieBreak::PreferDcbc => {
-                            AdaptiveTieBreak::PreferDcbc
-                        }
-                    },
+                    mean_cluster_radius_threshold: settings
+                        .switch_criteria
+                        .mean_cluster_radius_threshold,
                 },
                 BuiltInPlanning::Hybrid(_) => return None,
             }
@@ -3926,7 +3924,7 @@ mod tests {
                 clustering_min_input_count: Some(2),
                 clustering_min_effective_rank: Some(1),
                 clustering_min_cumulative_variance: Some(0.0),
-                clustering_adaptive_tie_break: Some(AdaptiveTieBreak::PreferDirectionalPca),
+                clustering_mean_cluster_radius_threshold: Some(0.25),
                 ..ClusteringConfigOverrides::default()
             },
         )
@@ -4512,7 +4510,7 @@ mod tests {
                     min_effective_rank: 1,
                     min_cumulative_variance: 0.25,
                 },
-                tie_break: AdaptiveTieBreak::PreferDcbc,
+                mean_cluster_radius_threshold: 0.4,
             },
             9,
             block_size_target,
@@ -4527,12 +4525,7 @@ mod tests {
                 assert_eq!(settings.directional_pca.random_seed, Some(7));
                 assert_eq!(settings.dcbc.cluster_count, 3);
                 assert_eq!(settings.dcbc.random_seed, Some(7));
-                assert_eq!(
-                    settings.switch_criteria.tie_break,
-                    lexongraph_streaming_indexer::AdaptiveSwitchTieBreak::PreferDcbc
-                );
-                assert_eq!(settings.switch_criteria.min_effective_rank, 1);
-                assert_eq!(settings.switch_criteria.min_cumulative_variance, 0.25);
+                assert_eq!(settings.switch_criteria.mean_cluster_radius_threshold, 0.4);
             }
             BuiltInPlanning::Dcbc(_) => panic!("expected adaptive settings"),
             BuiltInPlanning::DirectionalPca(_) => panic!("expected adaptive settings"),

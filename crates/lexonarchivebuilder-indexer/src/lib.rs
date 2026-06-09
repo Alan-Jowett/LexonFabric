@@ -10,8 +10,8 @@ pub mod search;
 pub mod tree_tools;
 
 pub use config::{
-    AdaptiveTieBreak, BatchRequest, BatchSummary, ClusteringAlgorithm, ClusteringConfigOverrides,
-    ClusteringMode, ClusteringProvider, ExecutionStage,
+    BatchRequest, BatchSummary, ClusteringAlgorithm, ClusteringConfigOverrides, ClusteringMode,
+    ClusteringProvider, ExecutionStage,
 };
 pub use runtime::{
     ClusteringFailureDiagnostics, INGESTION_ONLY_ROOT_ID_PLACEHOLDER,

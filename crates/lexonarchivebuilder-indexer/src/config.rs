@@ -6,8 +6,7 @@ use clap::{Args, ValueEnum};
 use lexongraph_block::EmbeddingSpec;
 use lexongraph_directional_pca::DirectionalPcaParams;
 use lexongraph_streaming_indexer::{
-    AdaptiveSwitchTieBreak as UpstreamAdaptiveSwitchTieBreak, BalanceConstraints, IndexItem,
-    Metadata,
+    BalanceConstraints, DEFAULT_MEAN_CLUSTER_RADIUS_THRESHOLD, IndexItem, Metadata,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -102,33 +101,6 @@ impl std::fmt::Display for ClusteringAlgorithm {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum AdaptiveTieBreak {
-    #[default]
-    PreferDirectionalPca,
-    PreferDcbc,
-}
-
-impl AdaptiveTieBreak {
-    pub(crate) fn to_upstream(self) -> UpstreamAdaptiveSwitchTieBreak {
-        match self {
-            Self::PreferDirectionalPca => UpstreamAdaptiveSwitchTieBreak::PreferDirectionalPca,
-            Self::PreferDcbc => UpstreamAdaptiveSwitchTieBreak::PreferDcbc,
-        }
-    }
-}
-
-impl std::fmt::Display for AdaptiveTieBreak {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            Self::PreferDirectionalPca => "prefer-directional-pca",
-            Self::PreferDcbc => "prefer-dcbc",
-        };
-        f.write_str(value)
-    }
-}
-
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 pub struct ClusteringConfigOverrides {
     #[arg(long, value_enum)]
@@ -161,8 +133,8 @@ pub struct ClusteringConfigOverrides {
     pub clustering_min_effective_rank: Option<usize>,
     #[arg(long)]
     pub clustering_min_cumulative_variance: Option<f32>,
-    #[arg(long, value_enum)]
-    pub clustering_adaptive_tie_break: Option<AdaptiveTieBreak>,
+    #[arg(long)]
+    pub clustering_mean_cluster_radius_threshold: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -188,7 +160,7 @@ pub(crate) enum ConfiguredClustering {
         random_seed: Option<u64>,
         balance_constraints: Option<BalanceConstraints>,
         params: DirectionalPcaParams,
-        tie_break: AdaptiveTieBreak,
+        mean_cluster_radius_threshold: f32,
     },
 }
 
@@ -229,6 +201,8 @@ impl ClusteringConfigOverrides {
                         .map(|_| "clustering_min_effective_rank"),
                     self.clustering_min_cumulative_variance
                         .map(|_| "clustering_min_cumulative_variance"),
+                    self.clustering_mean_cluster_radius_threshold
+                        .map(|_| "clustering_mean_cluster_radius_threshold"),
                 ]
                 .into_iter()
                 .flatten()
@@ -289,6 +263,12 @@ impl ClusteringConfigOverrides {
                         algorithm,
                     });
                 }
+                if self.clustering_mean_cluster_radius_threshold.is_some() {
+                    return Err(ConfigError::UnsupportedClusteringOptionForAlgorithm {
+                        option: "clustering_mean_cluster_radius_threshold",
+                        algorithm,
+                    });
+                }
             }
             (ClusteringProvider::BuiltIn, ClusteringAlgorithm::DirectionalPca) => {
                 if self.clustering_min_cluster_occupancy.is_some() {
@@ -315,10 +295,17 @@ impl ClusteringConfigOverrides {
                         algorithm,
                     });
                 }
+                if self.clustering_mean_cluster_radius_threshold.is_some() {
+                    return Err(ConfigError::UnsupportedClusteringOptionForAlgorithm {
+                        option: "clustering_mean_cluster_radius_threshold",
+                        algorithm,
+                    });
+                }
                 self.validate_directional_pca_numeric_options()?;
             }
             (ClusteringProvider::BuiltIn, ClusteringAlgorithm::Adaptive) => {
                 self.validate_directional_pca_numeric_options()?;
+                self.validate_adaptive_numeric_options()?;
             }
         }
 
@@ -367,7 +354,9 @@ impl ClusteringConfigOverrides {
                     random_seed,
                     balance_constraints: self.to_balance_constraints(),
                     params: self.directional_pca_params(),
-                    tie_break: self.clustering_adaptive_tie_break.unwrap_or_default(),
+                    mean_cluster_radius_threshold: self
+                        .clustering_mean_cluster_radius_threshold
+                        .unwrap_or(DEFAULT_MEAN_CLUSTER_RADIUS_THRESHOLD),
                 }
             }
             (
@@ -539,6 +528,19 @@ impl ClusteringConfigOverrides {
             return Err(ConfigError::InvalidClusteringOption {
                 option: "clustering_min_cumulative_variance",
                 message: "must be finite and in [0, 1]".into(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_adaptive_numeric_options(&self) -> Result<(), ConfigError> {
+        if let Some(mean_cluster_radius_threshold) = self.clustering_mean_cluster_radius_threshold
+            && (!mean_cluster_radius_threshold.is_finite() || mean_cluster_radius_threshold < 0.0)
+        {
+            return Err(ConfigError::InvalidClusteringOption {
+                option: "clustering_mean_cluster_radius_threshold",
+                message: "must be finite and non-negative".into(),
             });
         }
 
@@ -1115,7 +1117,7 @@ mod tests {
                 random_seed,
                 balance_constraints,
                 params,
-                tie_break,
+                mean_cluster_radius_threshold,
             } => {
                 assert_eq!(provider, ClusteringProvider::BuiltIn);
                 assert_eq!(mode, ClusteringMode::Aggregation);
@@ -1133,7 +1135,10 @@ mod tests {
                         min_cumulative_variance: DEFAULT_DIRECTIONAL_PCA_MIN_CUMULATIVE_VARIANCE,
                     }
                 );
-                assert_eq!(tie_break, AdaptiveTieBreak::PreferDirectionalPca);
+                assert_eq!(
+                    mean_cluster_radius_threshold,
+                    DEFAULT_MEAN_CLUSTER_RADIUS_THRESHOLD
+                );
             }
             ConfiguredClustering::Dcbc { .. } => {
                 panic!("expected adaptive settings when that algorithm is selected")
@@ -1306,6 +1311,26 @@ mod tests {
             ConfigError::UnsupportedClusteringAlgorithmForProvider {
                 provider: ClusteringProvider::AdapterClusteringPlanner,
                 algorithm: ClusteringAlgorithm::Adaptive,
+            }
+        ));
+    }
+
+    #[test]
+    fn adaptive_rejects_negative_mean_cluster_radius_threshold() {
+        let error = ClusteringConfigOverrides {
+            clustering_provider: Some(ClusteringProvider::BuiltIn),
+            clustering_algorithm: Some(ClusteringAlgorithm::Adaptive),
+            clustering_mean_cluster_radius_threshold: Some(-0.01),
+            ..ClusteringConfigOverrides::default()
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidClusteringOption {
+                option: "clustering_mean_cluster_radius_threshold",
+                ..
             }
         ));
     }

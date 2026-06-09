@@ -8,8 +8,9 @@ use lexonarchivebuilder_indexer::config::{
 };
 use lexonarchivebuilder_indexer::embedding::ConfiguredEmbeddingProvider;
 use lexonarchivebuilder_indexer::quality::{
-    assess_rooted_tree, default_report_path as default_quality_report_path, render_report_summary,
-    write_report as write_quality_report,
+    TnnRecallConfig, assess_rooted_tree_with_config,
+    default_report_path as default_quality_report_path, default_tnn_recall_sample_size,
+    default_tnn_recall_seed, render_report_summary, write_report as write_quality_report,
 };
 use lexonarchivebuilder_indexer::search::{
     default_report_path as default_search_report_path,
@@ -50,6 +51,10 @@ enum Command {
     Quality {
         #[arg(long)]
         root_id: String,
+        #[arg(long, default_value_t = default_tnn_recall_sample_size())]
+        tnn_recall_sample_size: usize,
+        #[arg(long, default_value_t = default_tnn_recall_seed())]
+        tnn_recall_seed: u64,
         #[arg(long)]
         json_out: Option<PathBuf>,
         #[command(flatten)]
@@ -163,12 +168,21 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Quality {
             root_id,
+            tnn_recall_sample_size,
+            tnn_recall_seed,
             json_out,
             block_store,
         } => {
             let root_id = parse_block_hash(&root_id)?;
             let store = configured_block_store(&block_store)?;
-            let report = assess_rooted_tree(&root_id, &store)?;
+            let report = assess_rooted_tree_with_config(
+                &root_id,
+                &store,
+                TnnRecallConfig {
+                    sample_size: tnn_recall_sample_size,
+                    seed: tnn_recall_seed,
+                },
+            )?;
             let output_path = json_out.unwrap_or_else(|| default_quality_report_path(&root_id));
             write_quality_report(&output_path, &report)?;
             println!("{}", render_report_summary(&report));
@@ -323,6 +337,10 @@ mod tests {
             "quality",
             "--root-id",
             "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            "--tnn-recall-sample-size",
+            "17",
+            "--tnn-recall-seed",
+            "9",
             "--block-store-root",
             "blocks",
         ])
@@ -331,6 +349,8 @@ mod tests {
         match cli.command {
             Command::Quality {
                 root_id,
+                tnn_recall_sample_size,
+                tnn_recall_seed,
                 block_store,
                 ..
             } => {
@@ -338,6 +358,8 @@ mod tests {
                     root_id,
                     "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
                 );
+                assert_eq!(tnn_recall_sample_size, 17);
+                assert_eq!(tnn_recall_seed, 9);
                 assert_eq!(block_store.block_store_profile, BlockStoreProfile::Local);
                 assert_eq!(block_store.block_store_root, Some(PathBuf::from("blocks")));
             }

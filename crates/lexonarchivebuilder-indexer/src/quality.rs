@@ -1,15 +1,26 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lexongraph_block::{Block, BlockHash, BranchEntry, EmbeddingSpec};
+use lexongraph_block::{Block, BlockHash, BranchEntry, EmbeddingSpec, LeafBlock, LeafEntry};
 use lexongraph_block_store::{BlockStore, BlockStoreError};
+use lexongraph_search::{
+    DefaultCandidateScorer, DefaultEmbeddingCompatibility, EncodedTargetEmbedding, Searcher,
+};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::tree_tools::decode_embedding_values;
+use crate::search::default_traversal_width as default_search_traversal_width;
+use crate::tree_tools::{
+    decode_embedding_values, metadata_values_to_text_map, search_with_partial_retry,
+};
 
 const DEFAULT_QUANTILE_BIN_COUNT: usize = 4;
+const DEFAULT_TNN_RECALL_SAMPLE_SIZE: usize = 100;
+const DEFAULT_TNN_RECALL_SEED: u64 = 0;
+const REQUIRED_RECALL_AT: [usize; 3] = [1, 5, 10];
 const POWER_ITERATION_STEPS: usize = 8;
 const EPSILON: f32 = 1.0e-6;
 
@@ -35,6 +46,14 @@ pub enum TreeQualityError {
     },
     #[error("block {block_id} contains a non-finite embedding value")]
     NonFiniteEmbedding { block_id: String },
+    #[error("tnn recall sample_size must be at least 1")]
+    InvalidTnnRecallSampleSize,
+    #[error(
+        "block {block_id} contains a zero-magnitude embedding that cannot be scored for tnn recall"
+    )]
+    ZeroMagnitudeEmbedding { block_id: String },
+    #[error("tnn recall search failed: {message}")]
+    Search { message: String },
     #[error(transparent)]
     BlockStore(#[from] BlockStoreError),
     #[error("failed to render tree quality report")]
@@ -152,10 +171,52 @@ pub struct TreeQualitySummary {
     pub max_block_max_centroid_distance: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TnnRecallConfig {
+    pub sample_size: usize,
+    pub seed: u64,
+}
+
+impl Default for TnnRecallConfig {
+    fn default() -> Self {
+        Self {
+            sample_size: DEFAULT_TNN_RECALL_SAMPLE_SIZE,
+            seed: DEFAULT_TNN_RECALL_SEED,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct TnnRecallHistogramBin {
+    pub matched_neighbor_count: usize,
+    pub recall: f32,
+    pub sample_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct TnnRecallAtMetrics {
+    pub k: usize,
+    pub mean_recall: f32,
+    pub stdev_recall: f32,
+    pub histogram: Vec<TnnRecallHistogramBin>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct CorpusTnnRecallReport {
+    pub query_source: String,
+    pub corpus_size: usize,
+    pub requested_sample_size: usize,
+    pub effective_sample_size: usize,
+    pub seed: u64,
+    pub traversal_width: usize,
+    pub recall_at: Vec<TnnRecallAtMetrics>,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct TreeQualityReport {
     pub root_id: String,
     pub summary: TreeQualitySummary,
+    pub corpus_tnn_recall: CorpusTnnRecallReport,
     pub findings: Vec<TreeQualityFinding>,
     pub layers: Vec<LayerQualityMetrics>,
     pub splits: Vec<SplitEffectivenessMetrics>,
@@ -165,6 +226,7 @@ pub struct TreeQualityReport {
 #[derive(Clone, Debug)]
 struct TraversalState {
     blocks: Vec<BlockQualityMetrics>,
+    corpus_entries: Vec<CorpusLeafEntry>,
     findings: Vec<TreeQualityFinding>,
     metrics_by_id: HashMap<BlockHash, BlockQualityMetrics>,
     child_ids_by_parent: HashMap<BlockHash, Vec<BlockHash>>,
@@ -179,6 +241,14 @@ struct BlockComputedMetrics {
     spread: SpreadMetrics,
     pca_first_component_variance_fraction: f32,
     quantile_occupancy: QuantileOccupancyMetrics,
+}
+
+#[derive(Clone, Debug)]
+struct CorpusLeafEntry {
+    neighbor_id: String,
+    leaf_block_id: BlockHash,
+    embedding_bytes: Vec<u8>,
+    embedding: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -226,6 +296,17 @@ pub fn assess_rooted_tree(
     root_id: &BlockHash,
     store: &dyn BlockStore,
 ) -> Result<TreeQualityReport, TreeQualityError> {
+    assess_rooted_tree_with_config(root_id, store, TnnRecallConfig::default())
+}
+
+pub fn assess_rooted_tree_with_config(
+    root_id: &BlockHash,
+    store: &dyn BlockStore,
+    tnn_recall: TnnRecallConfig,
+) -> Result<TreeQualityReport, TreeQualityError> {
+    if tnn_recall.sample_size == 0 {
+        return Err(TreeQualityError::InvalidTnnRecallSampleSize);
+    }
     let Some(root) = store.get(root_id)? else {
         return Err(TreeQualityError::MissingRootBlock {
             root_id: root_id.to_string(),
@@ -234,6 +315,7 @@ pub fn assess_rooted_tree(
 
     let mut state = TraversalState {
         blocks: Vec::new(),
+        corpus_entries: Vec::new(),
         findings: Vec::new(),
         metrics_by_id: HashMap::new(),
         child_ids_by_parent: HashMap::new(),
@@ -264,6 +346,13 @@ pub fn assess_rooted_tree(
 
     let layers = build_layer_metrics(&state);
     let splits = build_split_metrics(&state);
+    let corpus_tnn_recall = build_corpus_tnn_recall_report(
+        root_id,
+        &embedding_spec_for_block(&root.block),
+        &state,
+        store,
+        tnn_recall,
+    )?;
     let child_dispersion_inversion_count = splits
         .iter()
         .map(|split| split.child_dispersion_exceeds_parent_count)
@@ -302,6 +391,7 @@ pub fn assess_rooted_tree(
             mean_block_mean_centroid_distance,
             max_block_max_centroid_distance,
         },
+        corpus_tnn_recall,
         findings: state.findings,
         layers,
         splits,
@@ -314,6 +404,14 @@ pub fn default_report_path(root_id: &BlockHash) -> PathBuf {
         "block-tree-quality-{}.json",
         &root_id.to_string()[..8]
     ))
+}
+
+pub fn default_tnn_recall_sample_size() -> usize {
+    DEFAULT_TNN_RECALL_SAMPLE_SIZE
+}
+
+pub fn default_tnn_recall_seed() -> u64 {
+    DEFAULT_TNN_RECALL_SEED
 }
 
 pub fn write_report(path: &Path, report: &TreeQualityReport) -> Result<(), TreeQualityError> {
@@ -343,8 +441,35 @@ pub fn render_report_summary(report: &TreeQualityReport) -> String {
             report.summary.mean_block_mean_centroid_distance,
             report.summary.max_block_max_centroid_distance
         ),
+        format!(
+            "Corpus TNN-recall [{}]: corpus {}, sample {}/{}, seed {}, traversal width {}",
+            report.corpus_tnn_recall.query_source,
+            report.corpus_tnn_recall.corpus_size,
+            report.corpus_tnn_recall.effective_sample_size,
+            report.corpus_tnn_recall.requested_sample_size,
+            report.corpus_tnn_recall.seed,
+            report.corpus_tnn_recall.traversal_width
+        ),
         "Layer statistics:".into(),
     ];
+
+    for recall_at in &report.corpus_tnn_recall.recall_at {
+        let histogram = recall_at
+            .histogram
+            .iter()
+            .map(|bin| {
+                format!(
+                    "{} match(es) ({:.3}) => {} sample(s)",
+                    bin.matched_neighbor_count, bin.recall, bin.sample_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "- TNN Recall@{}: mean {:.6} stdev {:.6}, histogram [{}]",
+            recall_at.k, recall_at.mean_recall, recall_at.stdev_recall, histogram
+        ));
+    }
 
     for layer in &report.layers {
         lines.push(format!(
@@ -467,11 +592,14 @@ fn traverse_block(
     state.metrics_by_id.insert(block_id, metrics.clone());
     state.blocks.push(metrics.clone());
 
-    if let Block::Branch(branch) = block {
-        for entry in &branch.entries {
-            state.edge_count += 1;
-            handle_child_entry(block_id, &metrics, entry, depth + 1, store, ancestry, state)?;
+    match block {
+        Block::Branch(branch) => {
+            for entry in &branch.entries {
+                state.edge_count += 1;
+                handle_child_entry(block_id, &metrics, entry, depth + 1, store, ancestry, state)?;
+            }
         }
+        Block::Leaf(leaf) => collect_corpus_entries(block_id, leaf, state)?,
     }
 
     ancestry.pop();
@@ -693,6 +821,321 @@ fn build_split_metrics(state: &TraversalState) -> Vec<SplitEffectivenessMetrics>
     splits
 }
 
+fn build_corpus_tnn_recall_report(
+    root_id: &BlockHash,
+    root_embedding_spec: &EmbeddingSpec,
+    state: &TraversalState,
+    store: &dyn BlockStore,
+    config: TnnRecallConfig,
+) -> Result<CorpusTnnRecallReport, TreeQualityError> {
+    let traversal_width = default_search_traversal_width();
+    let corpus_size = state.corpus_entries.len();
+    let effective_sample_size = config.sample_size.min(corpus_size);
+    if effective_sample_size == 0 {
+        return Ok(CorpusTnnRecallReport {
+            query_source: "corpus-based".into(),
+            corpus_size,
+            requested_sample_size: config.sample_size,
+            effective_sample_size,
+            seed: config.seed,
+            traversal_width,
+            recall_at: REQUIRED_RECALL_AT
+                .into_iter()
+                .map(|k| TnnRecallAtMetrics {
+                    k,
+                    mean_recall: 0.0,
+                    stdev_recall: 0.0,
+                    histogram: Vec::new(),
+                })
+                .collect(),
+        });
+    }
+
+    let sampled_queries = select_corpus_sample(&state.corpus_entries, config);
+    let max_k = REQUIRED_RECALL_AT
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(1)
+        .min(corpus_size);
+    let searcher = Searcher::new(DefaultEmbeddingCompatibility, DefaultCandidateScorer);
+    let mut recalls_by_k = REQUIRED_RECALL_AT
+        .into_iter()
+        .map(|k| (k, Vec::<usize>::new()))
+        .collect::<BTreeMap<_, _>>();
+
+    for query in sampled_queries {
+        let exact_neighbors = exact_neighbors(&state.corpus_entries, query, max_k)?;
+        let approximate_neighbors = approximate_neighbors(
+            root_id,
+            root_embedding_spec,
+            query,
+            max_k,
+            traversal_width,
+            store,
+            &searcher,
+        )?;
+        let approximate_ids = approximate_neighbors
+            .into_iter()
+            .map(|entry| entry.neighbor_id)
+            .collect::<HashSet<_>>();
+
+        for &k in &REQUIRED_RECALL_AT {
+            let denominator = exact_neighbors.len().min(k);
+            let matched = exact_neighbors
+                .iter()
+                .take(k)
+                .filter(|entry| approximate_ids.contains(&entry.neighbor_id))
+                .count()
+                .min(denominator);
+            recalls_by_k.entry(k).or_default().push(matched);
+        }
+    }
+
+    Ok(CorpusTnnRecallReport {
+        query_source: "corpus-based".into(),
+        corpus_size,
+        requested_sample_size: config.sample_size,
+        effective_sample_size,
+        seed: config.seed,
+        traversal_width,
+        recall_at: REQUIRED_RECALL_AT
+            .into_iter()
+            .map(|k| {
+                let counts = recalls_by_k.remove(&k).unwrap_or_default();
+                tnn_recall_metrics(k, k.min(corpus_size), &counts)
+            })
+            .collect(),
+    })
+}
+
+fn tnn_recall_metrics(k: usize, denominator: usize, counts: &[usize]) -> TnnRecallAtMetrics {
+    let recalls = counts
+        .iter()
+        .map(|count| *count as f32 / denominator as f32)
+        .collect::<Vec<_>>();
+    let mut histogram_counts = BTreeMap::<usize, usize>::new();
+    for count in counts {
+        *histogram_counts.entry(*count).or_default() += 1;
+    }
+    TnnRecallAtMetrics {
+        k,
+        mean_recall: mean(&recalls),
+        stdev_recall: stdev(&recalls),
+        histogram: histogram_counts
+            .into_iter()
+            .map(
+                |(matched_neighbor_count, sample_count)| TnnRecallHistogramBin {
+                    matched_neighbor_count,
+                    recall: matched_neighbor_count as f32 / denominator as f32,
+                    sample_count,
+                },
+            )
+            .collect(),
+    }
+}
+
+fn select_corpus_sample(
+    entries: &[CorpusLeafEntry],
+    config: TnnRecallConfig,
+) -> Vec<&CorpusLeafEntry> {
+    let mut ordered = entries
+        .iter()
+        .map(|entry| (sample_key(&entry.neighbor_id, config.seed), entry))
+        .collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.neighbor_id.cmp(&right.1.neighbor_id))
+    });
+    ordered
+        .into_iter()
+        .take(config.sample_size.min(entries.len()))
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+fn sample_key(neighbor_id: &str, seed: u64) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(seed.to_le_bytes());
+    digest.update(neighbor_id.as_bytes());
+    digest.finalize().into()
+}
+
+fn exact_neighbors<'a>(
+    corpus_entries: &'a [CorpusLeafEntry],
+    query: &CorpusLeafEntry,
+    max_k: usize,
+) -> Result<Vec<&'a CorpusLeafEntry>, TreeQualityError> {
+    let mut ranked = corpus_entries
+        .iter()
+        .map(|entry| {
+            cosine_similarity(&query.embedding, &entry.embedding).map(|score| (score, entry))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                left.1
+                    .leaf_block_id
+                    .as_bytes()
+                    .cmp(right.1.leaf_block_id.as_bytes())
+            })
+            .then_with(|| left.1.neighbor_id.cmp(&right.1.neighbor_id))
+    });
+    Ok(ranked
+        .into_iter()
+        .take(max_k)
+        .map(|(_, entry)| entry)
+        .collect())
+}
+
+fn approximate_neighbors(
+    root_id: &BlockHash,
+    root_embedding_spec: &EmbeddingSpec,
+    query: &CorpusLeafEntry,
+    max_k: usize,
+    traversal_width: usize,
+    store: &dyn BlockStore,
+    searcher: &Searcher<DefaultEmbeddingCompatibility, DefaultCandidateScorer>,
+) -> Result<Vec<CorpusLeafEntry>, TreeQualityError> {
+    let target =
+        EncodedTargetEmbedding::new(query.embedding_bytes.clone(), root_embedding_spec.clone());
+    let result =
+        search_with_partial_retry(searcher, root_id, &target, traversal_width, max_k, store)
+            .map_err(TreeQualityError::from_search_error)?;
+    result
+        .leaves
+        .into_iter()
+        .map(|leaf| {
+            corpus_entry_from_leaf_result(leaf.leaf_block_id, &leaf.entry, root_embedding_spec)
+        })
+        .collect()
+}
+
+fn collect_corpus_entries(
+    block_id: BlockHash,
+    leaf: &LeafBlock,
+    state: &mut TraversalState,
+) -> Result<(), TreeQualityError> {
+    for entry in &leaf.entries {
+        state.corpus_entries.push(corpus_entry_from_leaf_result(
+            block_id,
+            entry,
+            &leaf.embedding_spec,
+        )?);
+    }
+    Ok(())
+}
+
+fn corpus_entry_from_leaf_result(
+    leaf_block_id: BlockHash,
+    entry: &LeafEntry,
+    embedding_spec: &EmbeddingSpec,
+) -> Result<CorpusLeafEntry, TreeQualityError> {
+    let Some(embedding) = decode_embedding_values(&entry.embedding, embedding_spec) else {
+        let block_id = leaf_block_id.to_string();
+        let encoding = embedding_spec.encoding.clone();
+        let dims = embedding_spec.dims;
+        return match expected_embedding_byte_len(embedding_spec) {
+            Some(expected_bytes) if entry.embedding.len() != expected_bytes => {
+                Err(TreeQualityError::InvalidEmbeddingLength {
+                    block_id,
+                    encoding,
+                    dims,
+                    expected_bytes,
+                    actual_bytes: entry.embedding.len(),
+                })
+            }
+            _ => Err(TreeQualityError::UnsupportedEmbeddingSpec {
+                block_id,
+                encoding,
+                dims,
+            }),
+        };
+    };
+    if embedding.iter().any(|value| !value.is_finite()) {
+        return Err(TreeQualityError::NonFiniteEmbedding {
+            block_id: leaf_block_id.to_string(),
+        });
+    }
+    if l2_norm(&embedding) <= EPSILON {
+        return Err(TreeQualityError::ZeroMagnitudeEmbedding {
+            block_id: leaf_block_id.to_string(),
+        });
+    }
+
+    Ok(CorpusLeafEntry {
+        neighbor_id: corpus_neighbor_id(leaf_block_id, entry),
+        leaf_block_id,
+        embedding_bytes: entry.embedding.clone(),
+        embedding,
+    })
+}
+
+fn corpus_neighbor_id(leaf_block_id: BlockHash, entry: &LeafEntry) -> String {
+    let mut digest = Sha256::new();
+    digest.update(leaf_block_id.as_bytes());
+    digest.update(&entry.embedding);
+    digest.update(entry.content.media_type.as_bytes());
+    digest.update(&entry.content.body);
+    for (key, value) in metadata_values_to_text_map(&entry.metadata) {
+        digest.update(key.as_bytes());
+        digest.update([0]);
+        digest.update(value.as_bytes());
+        digest.update([0xff]);
+    }
+    hex_string(&digest.finalize())
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut text, "{byte:02x}");
+    }
+    text
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f64, TreeQualityError> {
+    let mut dot = 0.0f64;
+    let mut left_norm_sq = 0.0f64;
+    let mut right_norm_sq = 0.0f64;
+    for (left, right) in left.iter().zip(right.iter()) {
+        let left = *left as f64;
+        let right = *right as f64;
+        dot += left * right;
+        left_norm_sq += left * left;
+        right_norm_sq += right * right;
+    }
+    if left_norm_sq == 0.0 || right_norm_sq == 0.0 {
+        return Err(TreeQualityError::ZeroMagnitudeEmbedding {
+            block_id: "<corpus-entry>".into(),
+        });
+    }
+    Ok(dot / (left_norm_sq.sqrt() * right_norm_sq.sqrt()))
+}
+
+impl TreeQualityError {
+    fn from_search_error(error: lexongraph_search::SearchError) -> Self {
+        match error {
+            lexongraph_search::SearchError::ScoringFailure { block_id, message }
+                if message.contains("zero magnitude") =>
+            {
+                Self::ZeroMagnitudeEmbedding {
+                    block_id: block_id.to_string(),
+                }
+            }
+            other => Self::Search {
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
 fn block_metrics(
     block_id: BlockHash,
     block: &Block,
@@ -742,6 +1185,13 @@ fn block_metrics(
         pca_first_component_variance_fraction: computed.pca_first_component_variance_fraction,
         quantile_occupancy: computed.quantile_occupancy,
     })
+}
+
+fn embedding_spec_for_block(block: &Block) -> EmbeddingSpec {
+    match block {
+        Block::Branch(branch) => branch.embedding_spec.clone(),
+        Block::Leaf(leaf) => leaf.embedding_spec.clone(),
+    }
 }
 
 fn compute_block_metrics<'a, I>(
@@ -1084,9 +1534,50 @@ mod tests {
         );
         let rendered = render_report_summary(&report);
         assert!(rendered.contains("Layer statistics:"));
+        assert!(rendered.contains("Corpus TNN-recall [corpus-based]:"));
+        assert!(rendered.contains("TNN Recall@1:"));
         assert!(rendered.contains("Per-parent split effectiveness:"));
         assert!(rendered.contains("Per-block statistics:"));
         assert!(rendered.contains("quantile occupancies ["));
+    }
+
+    #[test]
+    fn assessment_reports_rooted_corpus_tnn_recall_metrics() {
+        let dir = tempdir().unwrap();
+        let store = FilesystemBlockStore::new(dir.path().join("blocks")).unwrap();
+
+        let alpha = store.put(&named_leaf_block("alpha", &[1.0, 0.0])).unwrap();
+        let beta = store.put(&named_leaf_block("beta", &[0.0, 1.0])).unwrap();
+        let root = store
+            .put(&branch_block(
+                1,
+                vec![([1.0, 0.0], alpha), ([0.0, 1.0], beta)],
+            ))
+            .unwrap();
+
+        let report = assess_rooted_tree_with_config(
+            &root,
+            &store,
+            TnnRecallConfig {
+                sample_size: 2,
+                seed: 7,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.corpus_tnn_recall.query_source, "corpus-based");
+        assert_eq!(report.corpus_tnn_recall.corpus_size, 2);
+        assert_eq!(report.corpus_tnn_recall.effective_sample_size, 2);
+        assert_eq!(report.corpus_tnn_recall.seed, 7);
+        assert_eq!(report.corpus_tnn_recall.recall_at.len(), 3);
+        for metric in &report.corpus_tnn_recall.recall_at {
+            assert_eq!(metric.mean_recall, 1.0);
+            assert_eq!(metric.stdev_recall, 0.0);
+            assert_eq!(metric.histogram.len(), 1);
+            assert_eq!(metric.histogram[0].sample_count, 2);
+            assert_eq!(metric.histogram[0].matched_neighbor_count, metric.k.min(2));
+            assert_eq!(metric.histogram[0].recall, 1.0);
+        }
     }
 
     #[test]
@@ -1101,6 +1592,7 @@ mod tests {
 
         let rendered = fs::read_to_string(path).unwrap();
         assert!(rendered.contains("\"root_id\""));
+        assert!(rendered.contains("\"corpus_tnn_recall\""));
         assert!(rendered.contains("\"layers\""));
         assert!(rendered.contains("\"splits\""));
         assert!(rendered.contains("\"occupancies\""));
@@ -1185,6 +1677,29 @@ mod tests {
                 content: Content {
                     media_type: "text/plain".into(),
                     body: b"body".to_vec(),
+                },
+            }],
+            ext: None,
+        })
+    }
+
+    fn named_leaf_block(name: &str, embedding: &[f32; 2]) -> Block {
+        Block::Leaf(LeafBlock {
+            version: VERSION_1,
+            level: 0,
+            embedding_spec: EmbeddingSpec {
+                dims: 2,
+                encoding: "f32le".into(),
+            },
+            entries: vec![LeafEntry {
+                embedding: encode_f32(embedding),
+                metadata: vec![(
+                    ciborium::Value::Text("source_name".into()),
+                    ciborium::Value::Text(name.into()),
+                )],
+                content: Content {
+                    media_type: "text/plain".into(),
+                    body: name.as_bytes().to_vec(),
                 },
             }],
             ext: None,

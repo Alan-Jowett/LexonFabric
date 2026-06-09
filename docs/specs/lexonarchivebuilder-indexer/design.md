@@ -8,9 +8,9 @@ streaming delegated indexing, stage-selectable execution, standalone
 clustering input discovery, clustering-algorithm selection, clustering-option
 exposure, latest planning-policy and telemetry compatibility, upstream
 regression assessment, replay-submission and streaming-status observability,
-clustering-failure diagnostics, rooted block-tree quality assessment,
-rooted CLI search over stored trees, replay-stable fingerprinting, and
-layer-parallel block-construction evolution in
+clustering-failure diagnostics, rooted block-tree quality assessment with
+rooted TNN-recall diagnostics, rooted CLI search over stored trees,
+replay-stable fingerprinting, and layer-parallel block-construction evolution in
 `docs/specs/lexonarchivebuilder-indexer/requirements.md`.
 
 ## Scope
@@ -26,9 +26,9 @@ planning-policy and telemetry compatibility, upstream regression
 assessment, embedding-phase batch-progress observability,
 replay-submission observability, streaming-status observability,
 telemetry-count-semantics clarity, clustering-failure diagnostics,
-rooted block-tree quality assessment, rooted CLI search over stored trees,
-replay-stable delegated item identity, and layer-parallel delegated block
-construction for the local/testing profile.
+rooted block-tree quality assessment with rooted TNN-recall diagnostics,
+rooted CLI search over stored trees, replay-stable delegated item identity,
+and layer-parallel delegated block construction for the local/testing profile.
 
 This document is layered on top of:
 
@@ -65,6 +65,8 @@ owned by LexonGraph and its subordinate crates.
   approved MVP slice in this repository
 - CLI parsing, report rendering, and JSON artifact generation for the rooted
   block-tree quality tool
+- rooted-corpus sampling, exact-versus-approximate neighbor comparison, and
+  recall-report rendering for the rooted quality tool
 - CLI parsing, query embedding generation, search execution, and result
   rendering for the rooted CLI search tool
 - Docker Compose, container, and local test-environment artifacts that realize
@@ -571,6 +573,11 @@ same metric outputs appear in the human-readable summary and JSON artifact with
 severity labeling that distinguishes hard structural failures from advisory
 quality statistics.
 
+The same rooted report family also carries rooted retrieval-quality evidence
+through TNN-recall. That evidence is mode-tagged so corpus-based quality
+evaluation remains distinguishable from optional user-query diagnostics in both
+the human-readable summary and the JSON report.
+
 One required repository-owned heuristic in this increment compares a child's
 centroid-distance spread against its parent's corresponding spread. The design
 therefore requires the report to preserve enough parent-and-child quantitative
@@ -603,7 +610,49 @@ This flow is post-index analysis only. It does not change delegated index
 construction behavior, redefine LexonGraph validity rules, or introduce an
 MCP-visible diagnostics surface.
 
-**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-009, RQ-INDEXER-010
+**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-008D3, RQ-INDEXER-009, RQ-INDEXER-010
+
+### DSG-LFI-002D1 `Rooted corpus TNN-recall flow`
+
+LexonArchiveBuilder realizes corpus-based TNN-recall as a post-index quality flow
+over the same rooted snapshot used by the block-tree assessment.
+
+The reachable embedding set under the caller-supplied root is the evaluation
+corpus. The flow draws a uniform random sample of query embeddings from that
+rooted corpus using a caller-selectable sample size and a reproducible seed,
+then computes Recall@1, Recall@5, and Recall@10 for each sampled query.
+
+For each sampled query, the design compares:
+
+- exact nearest neighbors computed against the rooted corpus itself
+- approximate nearest neighbors returned through the repository's approved
+  rooted retrieval path over that same rooted snapshot
+
+Aggregate outputs such as mean recall, recall standard deviation, and recall
+histograms are derived only from this corpus-based mode. This keeps automated
+quality evaluation statistical, reproducible, and scoped to one rooted tree
+rather than to the entire configured block store.
+
+**Traces to:** RQ-INDEXER-008D1, RQ-INDEXER-008D3, RQ-INDEXER-010
+
+### DSG-LFI-002D2 `User-query diagnostic recall mode`
+
+LexonArchiveBuilder may also realize an optional diagnostic recall mode for one
+or more user-supplied query embeddings over the same rooted snapshot.
+
+This mode reuses the same exact-neighbor and approximate-neighbor comparison
+boundaries as corpus-based recall, but it remains explicitly diagnostic:
+
+- the result is labeled `diagnostic recall`
+- exact and approximate neighbors are emitted side by side for operator
+  comparison
+- the result is excluded from aggregate recall statistics, histograms, and any
+  automated quality verdicts
+
+This keeps one-off debugging evidence available without letting ad hoc queries
+distort the repository-owned rooted-quality metric.
+
+**Traces to:** RQ-INDEXER-008D2, RQ-INDEXER-008D3
 
 ### DSG-LFI-002E `Rooted CLI search flow`
 
@@ -860,8 +909,9 @@ to every block present in the store.
 
 The same rooted traversal supplies the per-layer grouping needed for cohesion,
 separation, PCA-axis-strength, quantile-occupancy, and split-effectiveness
-statistics. Repository-owned aggregation stays rooted-snapshot-local rather than
-mixing data from unrelated stored trees.
+statistics. The same rooted traversal also defines the exact embedding corpus
+used by rooted TNN-recall, so repository-owned aggregation stays rooted-
+snapshot-local rather than mixing data from unrelated stored trees.
 
 This design keeps assessment logic backend-neutral across local filesystem and
 the preserved production storage profile. It also prevents the repository from
@@ -1033,6 +1083,10 @@ dedicated CLI-only operator surface that accepts:
 - the same environment-selected block-store configuration family used by the
   indexer runtime
 - one root block identifier to analyze
+- optional rooted-corpus recall controls, including sample-size and seed inputs
+  for corpus-based TNN-recall
+- optional diagnostic-query inputs when the operator wants one-off
+  query-specific recall evidence
 - one optional artifact destination for the JSON report when the default output
   location is insufficient
 
@@ -1046,9 +1100,11 @@ The CLI renders a concise human-readable summary to the operator-facing output
 stream and writes the full machine-readable report artifact for downstream
 automation or offline analysis. The operator surface does not expose the
 quantile-bin count in this increment; that remains a repository-defined default
-behind the quality-tool boundary.
+behind the quality-tool boundary. The same surface must clearly identify whether
+reported recall evidence came from rooted-corpus sampling or from optional
+diagnostic-query execution.
 
-**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-009
+**Traces to:** RQ-INDEXER-008D, RQ-INDEXER-008D1, RQ-INDEXER-008D2, RQ-INDEXER-008D3, RQ-INDEXER-009
 
 ### DSG-LFI-007E `Rooted CLI search surface`
 

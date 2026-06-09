@@ -216,7 +216,8 @@ Inspect the rooted block-tree quality operator surface.
 that accepts a configured block-store boundary plus a caller-supplied root block
 identifier, does not require request-file batch execution or MCP exposure, and
 renders both an operator-readable summary and a machine-readable JSON report for
-the rooted analysis result.
+the rooted analysis result without requiring an operator-visible quantile-bin
+configuration surface in this increment.
 
 **Traces to:** RQ-INDEXER-008D, DSG-LFI-002D, DSG-LFI-005B, DSG-LFI-007D
 
@@ -362,18 +363,25 @@ requiring reads from the superseded custom filesystem layout.
 
 Run the rooted block-tree quality tool against a representative stored tree
 whose reachable rooted snapshot contains at least one known structural defect or
-boundary case plus at least one child or parent pair with distinguishable
-embedding-space spread.
+boundary case plus enough block variation to exercise per-layer cohesion,
+separation, PCA-axis, quantile-occupancy, and split-effectiveness reporting.
 
 **Pass condition:** the assessment traverses only the blocks reachable from the
 caller-supplied root, reports hard structural findings separately from advisory
-embedding-space quality heuristics, identifies the affected block relationships,
+embedding-space quality statistics, identifies the affected block relationships,
 and emits both per-block and aggregate quantitative evidence about the rooted
 tree's represented embedding-space region in the human-readable summary and the
-JSON artifact. That evidence includes explicit parent-versus-child
-centroid-distance spread reporting sufficient to determine whether each child
-represents the same or a smaller embedding-space region than its parent for the
-required heuristic.
+JSON artifact. That evidence includes per-block mean distance from centroid,
+per-layer mean and standard deviation for intra-block dispersion,
+per-layer mean and standard deviation for sibling centroid-to-centroid
+distance, per-block and per-layer PCA first-axis-strength reporting,
+per-block quantile-bin occupancy counts plus occupancy variance with explicit
+empty-bin detection and overfull-bin detection for bins whose occupancy exceeds
+two times the expected value, and per-parent split-effectiveness statistics.
+The required parent-versus-child centroid-distance heuristic is represented as
+aggregate split-effectiveness evidence, including the percentage of children
+whose dispersion exceeds the parent's plus the mean and maximum increase,
+rather than as emitted per-pair warning findings.
 
 **Traces to:** RQ-INDEXER-005, RQ-INDEXER-008D, DSG-LFI-002D, DSG-LFI-005B
 
@@ -568,7 +576,9 @@ against MCP and upstream block-validity boundaries.
 **Pass condition:** the package keeps the assessment tool on a CLI-only operator
 surface, does not redefine MCP retrieval or search behavior, and does not
 reinterpret advisory embedding-space quality heuristics as new upstream
-LexonGraph block-validity rules.
+LexonGraph block-validity rules. The package also keeps quantile-bin selection
+behind a repository-defined default rather than introducing a new operator
+parameter surface in this increment.
 
 **Traces to:** RQ-INDEXER-008D, RQ-INDEXER-009, RQ-INDEXER-010A, DSG-LFI-002D,
 DSG-LFI-009, DSG-LFI-011

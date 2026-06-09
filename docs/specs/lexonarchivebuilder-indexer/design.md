@@ -559,8 +559,9 @@ The reporting flow separates findings into two repository-owned classes:
 
 - structural-correctness findings for hard tree-shape violations such as a
   reachable child whose level is not lower than its parent
-- embedding-space quality findings for advisory heuristics about how well parent
-  and child blocks partition the represented embedding region
+- embedding-space quality statistics for advisory signals about cohesion,
+  separation, PCA-axis strength, quantile occupancy behavior, and split
+  effectiveness across the represented embedding region
 
 The report contains both aggregate rooted-tree evidence and per-block evidence.
 That evidence includes quantitative shape or spread measurements, but the
@@ -568,15 +569,35 @@ design intentionally does not freeze one metric family in the specification
 layer while `Q-INDEXER-065` remains open. The fixed design boundary is that the
 same metric outputs appear in the human-readable summary and JSON artifact with
 severity labeling that distinguishes hard structural failures from advisory
-quality warnings.
+quality statistics.
 
 One required repository-owned heuristic in this increment compares a child's
 centroid-distance spread against its parent's corresponding spread. The design
 therefore requires the report to preserve enough parent-and-child quantitative
-evidence to determine whether each child represents the same or a smaller
-embedding-space region than its parent under that centroid-distance comparison,
-rather than collapsing all quality reporting into aggregate-only spread
-statistics.
+evidence to determine how often children exceed their parent's corresponding
+spread, but this evidence is aggregated into split-effectiveness statistics
+rather than emitted as per-pair warning findings.
+
+The required repository-owned quality model for this increment includes:
+
+- per-block mean distance from centroid as the base intra-block dispersion input
+- per-layer mean and standard deviation of those block-level dispersion values
+- per-layer mean and standard deviation of sibling centroid-to-centroid
+  distances
+- per-block first-principal-component variance fraction with per-layer mean and
+  standard deviation aggregation
+- per-block quantile-bin occupancy counts plus occupancy variance, empty-bin
+  detection, and overfull-bin detection using a repository-defined default bin
+  count, where an overfull bin is one whose occupancy exceeds two times the
+  expected occupancy for the block's selected quantile partition
+- per-parent split-effectiveness statistics covering the percentage of children
+  whose dispersion exceeds the parent's plus the mean and maximum increase for
+  those children
+
+This design keeps quality interpretation statistical and advisory. Structural
+violations remain the only repository-owned hard findings, while the parent- to-
+child dispersion heuristic contributes to aggregate quality evidence rather than
+to emitted warning records.
 
 This flow is post-index analysis only. It does not change delegated index
 construction behavior, redefine LexonGraph validity rules, or introduce an
@@ -837,6 +858,11 @@ discovers reachable descendants by following stored parent-child references, and
 limits all findings and aggregates to the reachable rooted snapshot rather than
 to every block present in the store.
 
+The same rooted traversal supplies the per-layer grouping needed for cohesion,
+separation, PCA-axis-strength, quantile-occupancy, and split-effectiveness
+statistics. Repository-owned aggregation stays rooted-snapshot-local rather than
+mixing data from unrelated stored trees.
+
 This design keeps assessment logic backend-neutral across local filesystem and
 the preserved production storage profile. It also prevents the repository from
 introducing a second storage-reader stack with different reachability or
@@ -1018,7 +1044,9 @@ increment.
 
 The CLI renders a concise human-readable summary to the operator-facing output
 stream and writes the full machine-readable report artifact for downstream
-automation or offline analysis.
+automation or offline analysis. The operator surface does not expose the
+quantile-bin count in this increment; that remains a repository-defined default
+behind the quality-tool boundary.
 
 **Traces to:** RQ-INDEXER-008D, RQ-INDEXER-009
 

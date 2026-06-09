@@ -3,8 +3,8 @@
 ## Document Status
 
 - **Phase:** Phase 1 - Requirements Discovery
-- **Status:** Approved streaming-indexer migration baseline with incremental requirements patches for latest LexonGraph planning-policy and telemetry compatibility, upstream regression assessment, clustering-failure diagnostics, rooted block-tree quality assessment discovery, and rooted CLI search discovery
-- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream regression assessment, embedding-phase, replay-submission and streaming-status observability, clustering-failure diagnosability, rooted block-tree quality assessment, rooted CLI search over stored trees, and layer-parallel block-construction evolution
+- **Status:** Approved streaming-indexer migration baseline with incremental requirements patches for latest LexonGraph planning-policy and telemetry compatibility, upstream regression assessment, clustering-failure diagnostics, rooted block-tree quality assessment discovery plus quality-metric refinement, and rooted CLI search discovery
+- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-algorithm selection, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream regression assessment, embedding-phase, replay-submission and streaming-status observability, clustering-failure diagnosability, rooted block-tree quality assessment with refined per-layer quality metrics, rooted CLI search over stored trees, and layer-parallel block-construction evolution
 
 ## USER-REQUEST
 
@@ -100,6 +100,14 @@
 - **UR-90 [KNOWN]:** In this increment, the CLI search tool should emit both human-readable results and machine-readable JSON output.
 - **UR-91 [INFERRED]:** The CLI search tool should remain additive to the existing MCP server search capability rather than replacing or redefining the MCP search surface.
 - **UR-92 [INFERRED]:** The CLI search tool should reuse the existing block-store and rooted-tree boundaries rather than introducing a parallel repository-local search corpus description.
+- **UR-93 [KNOWN]:** The current rooted quality tool's per-pair child-spread warnings are probably false positives, so this heuristic should be reported as an aggregate count rather than as emitted warning findings.
+- **UR-94 [KNOWN]:** The rooted quality tool should compute mean distance from centroid for each block, then report mean and standard deviation by layer as a rough statistical measure of where blocks fit within the embedding space.
+- **UR-95 [KNOWN]:** The rooted quality tool should compute, for every layer, the mean intra-block dispersion and the standard deviation of dispersion across all blocks in that layer so block cohesion and under- or over-splitting become visible.
+- **UR-96 [KNOWN]:** The rooted quality tool should compute, for every layer, the mean centroid-to-centroid distance between sibling blocks and the standard deviation of those distances so block separation and overlapping clusters become visible.
+- **UR-97 [KNOWN]:** For each block, the rooted quality tool should compute the fraction of total variance explained by the first principal component, aggregate that metric by layer using mean and standard deviation, and use it to detect weak or degenerate PCA axes.
+- **UR-98 [KNOWN]:** For each block, the rooted quality tool should measure quantile-bin occupancy counts plus the variance of those occupancies, and detect empty bins plus bins whose occupancy exceeds two times the expected value so quantile failures and misaligned PCA axes become visible.
+- **UR-99 [KNOWN]:** For every parent block and its children, the rooted quality tool should compute the percentage of children whose dispersion exceeds the parent's, the mean increase for such cases, and the maximum observed increase so multimodal parents and ineffective splits become visible.
+- **UR-100 [KNOWN]:** In this increment, the number of quantile bins should remain a repository-defined default rather than an operator-visible parameter.
 
 ## Change Manifest
 
@@ -155,6 +163,7 @@
 | CM-INDEXER-048 | Add | Require the assessment to distinguish structural invariants from embedding-space heuristics and to emit quantitative human-readable plus machine-readable quality evidence for each rooted tree | UR-81, UR-82, UR-83, UR-85, UR-87 |
 | CM-INDEXER-049 | Add | Introduce a CLI-only rooted search tool that embeds caller-provided text through a caller-provided embedding endpoint, searches a caller-selected rooted tree through `lexongraph-search`, and returns the top `k` matching leaf nodes | UR-88, UR-89 |
 | CM-INDEXER-050 | Add | Keep the rooted search tool additive to MCP search while requiring both human-readable and machine-readable result output without introducing a second repository-local search corpus model | UR-90, UR-91, UR-92 |
+| CM-INDEXER-051 | Revise | Refine rooted quality assessment so quality reporting covers tree consistency plus per-layer cohesion, separation, PCA-axis, quantile-occupancy, and parent-child split-effectiveness statistics; parent-versus-child spread inversions become aggregate counts rather than per-pair warnings | UR-82, UR-83, UR-93, UR-94, UR-95, UR-96, UR-97, UR-98, UR-99, UR-100 |
 
 ## Before / After
 
@@ -407,6 +416,11 @@
 
 - **Before [KNOWN]:** The requirements do not define whether such an operator search tool should emit only terminal-friendly output or also a machine-readable representation, and they do not constrain whether the tool may invent a second repository-local search corpus model.
 - **After [KNOWN]:** The requirements now require rooted CLI search to emit both human-readable and machine-readable results while remaining additive to the existing MCP search surface and reusing the existing rooted-tree plus block-store boundaries.
+
+### BA-INDEXER-051
+
+- **Before [KNOWN]:** The rooted quality requirements treated parent-versus-child centroid-distance spread as advisory per-pair findings, which can overstate problems when the parent is measured over summarized child representatives while the child is measured over its own members, and they did not yet define a fuller per-layer quality model for cohesion, separation, PCA-axis strength, quantile occupancy behavior, or split effectiveness.
+- **After [KNOWN]:** The rooted quality requirements now treat parent-versus-child spread inversions as aggregate heuristic counts only, not emitted warning findings, and require the report to include a refined per-layer quality model covering intra-block dispersion, sibling-centroid separation, PCA-axis strength, quantile-bin occupancy variance, and parent-to-child dispersion deltas, with repository-defined default quantile bins in this increment.
 
 ## Requirements
 
@@ -878,14 +892,26 @@ reachable tree.
   quantitative heuristics about how the tree partitions embedding space,
   including whether a child's centroid-distance spread is less than or equal to
   its parent's corresponding spread so child blocks represent the same or a
-  smaller region than their parents.
+  smaller region than their parents, but this heuristic SHALL be reported as an
+  aggregate inversion count rather than as emitted per-pair warning findings.
 - **Quantification requirement [KNOWN]:** The assessment must emit quantitative
   per-block and aggregate evidence characterizing the size or shape of the
   embedding-space region represented by each block and by the rooted tree as a
-  whole.
+  whole. That evidence SHALL include:
+  - per-block mean distance from centroid
+  - per-layer mean and standard deviation of intra-block dispersion
+  - per-layer mean and standard deviation of sibling centroid-to-centroid distance
+  - per-block first-principal-component variance fraction plus per-layer mean and standard deviation of that metric
+  - per-block quantile-bin occupancy counts, occupancy variance, empty-bin detection, and detection of bins whose occupancy exceeds two times the expected value
+  - per-parent split-effectiveness statistics covering the percentage of children whose dispersion exceeds the parent's plus the mean and maximum increase for those cases
 - **Severity discipline [INFERRED]:** Structural-correctness violations and
-  advisory embedding-space quality heuristics SHALL be reported distinctly so
-  callers can separate hard invariant failures from softer quality warnings.
+  advisory embedding-space statistics SHALL be reported distinctly so callers
+  can separate hard invariant failures from softer quality signals, and the
+  parent-versus-child spread heuristic count SHALL remain advisory-only in this
+  increment rather than producing per-block warning records.
+- **Quantile-bin boundary [KNOWN]:** The number of quantile bins SHALL remain a
+  repository-defined default in this increment rather than an operator-visible
+  parameter.
 - **Output requirement [KNOWN]:** The assessment must emit a human-readable
   summary and a machine-readable JSON artifact for the same analyzed rooted
   tree.
@@ -1020,8 +1046,8 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 - **Q-INDEXER-062 [UNKNOWN]:** Does the latest upstream status-observer contract expose enough information for LexonArchiveBuilder to preserve its current replay-submission handoff and long-running liveness messages without weakening operator visibility?
 - **Q-INDEXER-063 [UNKNOWN]:** Are any repository-required split-stage replay guarantees now expressed through different upstream lifecycle transitions beyond the observed rename from training completion to planning completion?
 - **Q-INDEXER-064 [UNKNOWN]:** Does the newest upstream telemetry contract intend `item_count` to remain invocation-total for planning-pass events while hierarchy-planning and bottom-up assembly events report stage-local or layer-local progress units, or is that count shape still evolving?
-- **Q-INDEXER-065 [UNKNOWN]:** Which quantitative embedding-space shape measures best satisfy the required "quality of how the space is divided up" signal for this increment without overfitting the requirements to one metric family too early?
-- **Q-INDEXER-066 [UNKNOWN]:** Should the rooted block-tree quality tool remain purely advisory for heuristic findings in this increment, or should some classes of findings influence process exit status beyond clearly hard structural violations?
+- **Q-INDEXER-065 [UNKNOWN]:** After the approved intra-block dispersion, sibling-centroid separation, PCA-axis strength, quantile-occupancy, and parent-child dispersion-delta metrics land, which additional quantitative embedding-space shape measures would improve the rooted quality signal in a future increment without overfitting too early?
+- **Q-INDEXER-066 [UNKNOWN]:** Future increments may revisit whether any rooted-quality heuristics beyond hard structural violations should influence process exit status, but this increment keeps the heuristic inversion count and layer statistics advisory-only.
 - **Q-INDEXER-067 [UNKNOWN]:** Beyond the required query text, embedding endpoint, root, and `k`, does the rooted CLI search tool need repository-approved filters, score thresholds, or output-field selection in this increment?
 - **Q-INDEXER-068 [UNKNOWN]:** Should the rooted CLI search tool treat the caller-supplied embedding endpoint as the complete query-embedding configuration, or must it also accept repository-specific embedding-spec inputs such as dimensions or encoding overrides at the CLI boundary?
 
@@ -1034,6 +1060,55 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
   - user request in this session: "We need a tool that given a block store and root and measure the quality / correctness of the block tree. This would include heuristics like children always have lower level than parents. Distance from centroid of embeddings in parent is the same or bigger than distance from centroid if embeddings in child (i.e. children span a smaller part of the embedding space than their parents). It would also be useful to gain a quantifiable measure of the quality of how the space is divided up (i.e. the shape that each block represents in teh embedding space)."
   - user clarification in this session selecting: "CLI-only operator tool (Recommended)"
   - user clarification in this session selecting: "Human-readable summary plus machine-readable JSON artifact (Recommended)"
+  - user request in this session: "yes, that warning is probably a false positive. Report as a count, but don't issue warnings. Can we instead compute mean distance from centroid for each block, then compute mean by layer and stdev by layer? i.e. a rough statistical measure of the where the blocks fit within the embedding space?"
+  - user request in this session: "I think we need to refine what we are measuring as quality. It should include tree consistency (like we already have) but also:
+1. Intra‑Block Dispersion Statistics (Per Layer)
+The system SHALL compute, for every layer of the tree:  
+- the mean intra‑block dispersion (mean distance of embeddings to their block centroid), and  
+- the standard deviation of dispersion across all blocks in that layer.  
+ 
+These values SHALL be used to assess block cohesion and detect under‑ or over‑splitting.
+ 
+---
+ 
+2. Inter‑Centroid Distance Statistics (Per Layer)
+The system SHALL compute, for every layer:  
+- the mean centroid‑to‑centroid distance between sibling blocks, and  
+- the standard deviation of these distances.  
+ 
+These values SHALL be used to assess block separation and detect overlapping or poorly differentiated clusters.
+ 
+---
+ 
+3. PCA Axis Strength (Per Layer)
+For each block at each layer, the system SHALL compute:  
+- the fraction of total variance explained by the first principal component (λ₁ / Σλᵢ).  
+ 
+This metric SHALL be aggregated per layer (mean and stdev) and SHALL be used to detect weak or degenerate PCA axes.
+ 
+---
+ 
+4. Quantile Bin Occupancy Variance (Per Layer)
+For each block, the system SHALL measure:  
+- the occupancy count of each quantile bin, and  
+- the variance of these occupancies.  
+ 
+The system SHALL detect and record:  
+- empty bins, and  
+- bins with occupancy greater than 2× the expected value.  
+ 
+This metric SHALL be used to detect quantile failures and misaligned PCA axes.
+ 
+---
+ 
+5. Parent‑to‑Child Dispersion Delta (Per Split)
+For every parent block and its children, the system SHALL compute:  
+- the percentage of children whose dispersion exceeds that of the parent,  
+- the mean increase in dispersion for such cases, and  
+- the maximum observed increase.  
+ 
+This metric SHALL be used to detect multimodal blocks and ineffective splits."
+  - user clarification in this session selecting: "Repository-defined default (Recommended)"
   - user request in this session: "update the LexonGraph rust crates. The latest version contains a significant api change. Rebuild the indexer code to use the new LexonGraph streaming indexer. Maintain other invariants, update tests. When done, branch, commit, push, pr"
   - user request in this session: "adapt implementation to latest lexongraph version and tell me if lexongraph regressed features we need so I can fix it."
   - user clarification in this session selecting: "Preserve the current external stage contract (Recommended)"

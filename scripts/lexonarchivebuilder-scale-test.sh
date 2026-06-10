@@ -10,7 +10,7 @@ Usage:
 Examples:
   scripts/lexonarchivebuilder-scale-test.sh rsync.ietf.org::mailman-archive/ipsec/
   scripts/lexonarchivebuilder-scale-test.sh --sources-file examples/local/scale-test/rsync.sources.sample.txt
-  scripts/lexonarchivebuilder-scale-test.sh --clustering-mode divisive --clustering-algorithm directional-pca --clustering-cluster-count 3 rsync.ietf.org::mailman-archive/ipsec/
+  scripts/lexonarchivebuilder-scale-test.sh --clustering-provider built-in --clustering-mode divisive --clustering-algorithm directional-pca --clustering-cluster-count 3 rsync.ietf.org::mailman-archive/ipsec/
 
 This script:
   1. fetches mailbox content from one or more rsync URLs
@@ -20,6 +20,7 @@ This script:
   5. leaves summary/root handoff output in the run directory
 
 Supported clustering flags:
+  --clustering-provider
   --clustering-mode
   --clustering-algorithm
   --clustering-cluster-count
@@ -34,6 +35,8 @@ Supported clustering flags:
   --clustering-min-input-count
   --clustering-min-effective-rank
   --clustering-min-cumulative-variance
+  --clustering-pc1-explained-variance-ratio-threshold
+  --clustering-dcbc-max-embedding-count
 EOF
 }
 
@@ -169,6 +172,7 @@ while [[ $# -gt 0 ]]; do
       RUN_NAME="$2"
       shift 2
       ;;
+    --clustering-provider|\
     --clustering-mode|\
     --clustering-algorithm|\
     --clustering-cluster-count|\
@@ -182,7 +186,9 @@ while [[ $# -gt 0 ]]; do
     --clustering-temperature|\
     --clustering-min-input-count|\
     --clustering-min-effective-rank|\
-    --clustering-min-cumulative-variance)
+    --clustering-min-cumulative-variance|\
+    --clustering-pc1-explained-variance-ratio-threshold|\
+    --clustering-dcbc-max-embedding-count)
       [[ $# -ge 2 ]] || { printf 'error: %s requires a value\n' "$1" >&2; exit 1; }
       append_indexer_option "$1" "$2"
       shift 2

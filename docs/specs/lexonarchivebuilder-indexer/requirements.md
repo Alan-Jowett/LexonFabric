@@ -3,8 +3,8 @@
 ## Document Status
 
 - **Phase:** Phase 1 - Requirements Discovery
-- **Status:** Approved streaming-indexer migration baseline with incremental requirements patches for latest LexonGraph planning-policy and telemetry compatibility, upstream regression assessment, clustering-failure diagnostics, rooted block-tree quality assessment discovery plus quality-metric refinement, rooted TNN-recall diagnostics, and rooted CLI search discovery
-- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-mode and clustering-algorithm selection, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream regression assessment, embedding-phase, replay-submission and streaming-status observability, clustering-failure diagnosability, rooted block-tree quality assessment with refined per-layer quality metrics and rooted TNN-recall diagnostics, rooted CLI search over stored trees, and layer-parallel block-construction evolution
+- **Status:** Approved streaming-indexer migration baseline with incremental requirements patches for latest LexonGraph planning-policy and telemetry compatibility, upstream regression assessment, adapter clustering planner default exposure, built-in adaptive planning exposure, clustering-failure diagnostics, rooted block-tree quality assessment discovery plus quality-metric refinement, rooted TNN-recall diagnostics, and rooted CLI search discovery
+- **Scope:** LexonArchiveBuilder indexer integration boundary plus incremental email-artifact, chunk-indexing, local block-store interoperability, replay-based streaming delegated indexing, stage-selectable execution, standalone clustering input discovery, clustering-provider plus clustering-mode and clustering-algorithm selection, adaptive built-in planning exposure, clustering-option exposure, latest planning-policy and telemetry compatibility, upstream regression assessment, embedding-phase, replay-submission and streaming-status observability, clustering-failure diagnosability, rooted block-tree quality assessment with refined per-layer quality metrics and rooted TNN-recall diagnostics, rooted CLI search over stored trees, and layer-parallel block-construction evolution
 
 ## USER-REQUEST
 
@@ -60,11 +60,11 @@
 - **UR-50 [KNOWN]:** The latest LexonGraph streaming indexer update now requires callers to select a clustering algorithm and provide algorithm-specific options.
 - **UR-51 [KNOWN]:** LexonArchiveBuilder should expose clustering algorithm selection and supported clustering options through the command line.
 - **UR-52 [KNOWN]:** Reasonable defaults are acceptable for clustering settings the caller does not specify.
-- **UR-53 [KNOWN]:** The upstream built-in clustering choices currently exposed by LexonGraph are DCBC and directional PCA, and they do not share the same option set.
+- **UR-53 [KNOWN]:** The upstream fixed built-in clustering choices already surfaced by LexonGraph are DCBC and directional PCA, and they do not share the same option set.
 - **UR-54 [KNOWN]:** The current builder can report mailbox processing and delegated-item preparation, then remain silent during long-running embedding work even while the local embedding service is actively consuming CPU.
 - **UR-55 [INFERRED]:** Progress visibility for ingestion-plus-embedding execution should remain continuous across the gap between delegated-item preparation and the first downstream streaming-status event so operators can distinguish slow embedding work from a hung batch.
 - **UR-56 [KNOWN]:** When a clustering-enabled run omits `cluster_count`, LexonArchiveBuilder should auto-size the effective cluster count from the number of blocks being clustered and the embedding size instead of falling back to a small fixed default.
-- **UR-57 [KNOWN]:** This auto-sizing rule should apply consistently to both built-in clustering algorithms currently exposed by LexonGraph.
+- **UR-57 [KNOWN]:** This auto-sizing rule should apply consistently to both fixed built-in clustering algorithms already surfaced by LexonGraph.
 - **UR-58 [KNOWN]:** An explicit caller-supplied `cluster_count` should continue to override auto-sizing; the derived count is only for the omitted-option path.
 - **UR-59 [KNOWN]:** During clustering-only replay, LexonArchiveBuilder should report repository-owned replay-batch submission progress using the batch count and cumulative delegated-item count it already knows, so operators can see how much work has been submitted to the streaming API.
 - **UR-60 [KNOWN]:** When LexonArchiveBuilder finishes submitting replay batches and begins waiting for upstream planning-pass completion, the runtime progress stream should emit an explicit phase-boundary message so operators can distinguish local submission progress from upstream planning-pass heartbeats.
@@ -72,7 +72,7 @@
 - **UR-62 [KNOWN]:** The latest LexonGraph streaming indexer replaces the older training-oriented built-in clustering factory surface with a planning-policy surface, including `HierarchicalPlanningPolicy`, `BuiltInPlanningPolicy`, planning passes, explicit planning completion, hierarchy-planning status phases, and bottom-up assembly status phases.
 - **UR-63 [KNOWN]:** Preserve the current external stage contract (`full`, `ingestion+embedding`, `clustering+block-assembly`) and existing MCP search or retrieval behavior for already-indexed content while adapting to the latest upstream indexing API.
 - **UR-64 [KNOWN]:** Determine whether the latest LexonGraph update regressed any repository-required features or only changed the API shape, so any true upstream regression can be fixed explicitly rather than hidden by narrowing LexonArchiveBuilder behavior.
-- **UR-65 [INFERRED]:** LexonArchiveBuilder currently depends on repository-owned behavior layered on top of the upstream indexing crate, including deterministic split-stage replay, explicit built-in algorithm selection for `dcbc` and `directional-pca`, omitted `cluster_count` auto-sizing, and runtime progress projection that hides raw upstream lifecycle details.
+- **UR-65 [INFERRED]:** LexonArchiveBuilder currently depends on repository-owned behavior layered on top of the upstream indexing crate, including deterministic split-stage replay, explicit built-in algorithm selection for `dcbc`, `directional-pca`, and now `adaptive`, omitted `cluster_count` auto-sizing, and runtime progress projection that hides raw upstream lifecycle details.
 - **UR-66 [INFERRED]:** If the latest upstream contract no longer exposes a repository-required capability, LexonArchiveBuilder must surface that incompatibility explicitly in requirements, design, and implementation review rather than silently dropping the affected behavior during adaptation.
 - **UR-67 [KNOWN]:** Update LexonArchiveBuilder to the latest LexonGraph `main` revision again because the upstream streaming indexer now exposes richer live telemetry through the status-observer surface.
 - **UR-68 [KNOWN]:** LexonArchiveBuilder should project the new upstream telemetry onto the existing runtime progress/log surface.
@@ -128,6 +128,12 @@
 - **UR-118 [KNOWN]:** The clustering-mode contract should remain content-type-agnostic so it applies uniformly across current and future content types.
 - **UR-119 [KNOWN]:** Local/testing and production-shaped indexer invocations should expose the same clustering-mode contract and default.
 - **UR-120 [KNOWN]:** Existing algorithm-specific clustering controls should continue to work under the selected clustering mode.
+- **UR-121 [KNOWN]:** LexonGraph now has a new clustering provider, the adapter clustering planner.
+- **UR-122 [KNOWN]:** LexonArchiveBuilder should expose delegated clustering-provider selection at the indexer layer rather than hard-coding only the current built-in planning path.
+- **UR-123 [KNOWN]:** The adapter clustering planner should become the default delegated clustering provider when the caller does not choose one.
+- **UR-124 [KNOWN]:** The upstream LexonGraph built-in planning surface also exposes an adaptive planning policy.
+- **UR-125 [KNOWN]:** LexonArchiveBuilder should expose that adaptive built-in policy as an explicit clustering algorithm choice instead of narrowing built-in selection to only `dcbc` and `directional-pca`.
+- **UR-126 [KNOWN]:** For this increment, the adaptive built-in policy should preserve the upstream semantics of starting with directional PCA and switching to DCBC when the adaptive model says so.
 
 ## Change Manifest
 
@@ -190,6 +196,8 @@
 | CM-INDEXER-055 | Revise | Extend corpus-based rooted TNN-Recall so the approximate-neighbor path exposes configurable traversal width for measurement sweeps without changing aggregate-mode ownership | UR-102, UR-113 |
 | CM-INDEXER-056 | Revise | Extend delegated clustering control to include a first-class clustering-mode selector, with aggregation as the repository default and divisive as an explicit opt-in | UR-114, UR-115, UR-116 |
 | CM-INDEXER-057 | Add | Preserve indexing-only clustering-mode parity across environments and content types while keeping existing algorithm-specific controls subordinate to the selected mode and upstream contract | UR-117, UR-118, UR-119, UR-120 |
+| CM-INDEXER-058 | Revise | Extend delegated clustering control to include clustering-provider selection, with the adapter clustering planner as the repository default while preserving explicit upstream-compatible provider choice | UR-121, UR-122, UR-123, UR-119, UR-120 |
+| CM-INDEXER-059 | Revise | Extend the exposed built-in clustering algorithm family to include upstream adaptive planning as an explicit caller choice, preserving its directional-PCA-first then DCBC-switch semantics instead of narrowing built-in selection to fixed algorithms only | UR-124, UR-125, UR-126, UR-120 |
 
 ## Before / After
 
@@ -478,6 +486,16 @@
 - **Before [KNOWN]:** The requirements did not explicitly constrain the new clustering-mode choice to remain indexing-only, environment-stable, and content-type-agnostic, nor did they tie existing algorithm-specific controls to the selected mode.
 - **After [KNOWN]:** The requirements now preserve unchanged MCP behavior, require the same clustering-mode contract across local/testing and production-shaped invocations, keep the control generic across current and future content types, and require existing algorithm-specific controls to remain subordinate to the selected mode and upstream support matrix.
 
+### BA-INDEXER-058
+
+- **Before [KNOWN]:** The requirements treated clustering configuration as mode, algorithm, and option selection on top of one implied upstream planning-provider family.
+- **After [KNOWN]:** The requirements now treat clustering provider, mode, algorithm, and supported option values as the explicit clustering-enabled orchestration surface so new upstream provider families can be adopted without hidden default behavior.
+
+### BA-INDEXER-059
+
+- **Before [KNOWN]:** The requirements treated the built-in clustering algorithm family as only `dcbc` and `directional-pca`, even though the upstream planning surface also exposes adaptive planning.
+- **After [KNOWN]:** The requirements now include adaptive built-in planning as an explicit algorithm choice and preserve the upstream adaptive policy semantics of starting with directional PCA and switching to DCBC when the adaptive model says so.
+
 ## Requirements
 
 ### Functional Requirements
@@ -603,74 +621,89 @@ the configured `BlockStore` through the LexonGraph block-iteration API.
   yield the same logical clustering result under unchanged upstream semantics.
 - **Traceability:** UR-39, UR-40
 
-#### RQ-INDEXER-003F - Clustering mode and algorithm selection
+#### RQ-INDEXER-003F - Clustering provider, mode, and algorithm selection
 
 For any execution stage that includes clustering plus block assembly,
-LexonArchiveBuilder SHALL provide an explicit delegated clustering mode and
-delegated clustering algorithm selection that satisfies the updated LexonGraph
-streaming indexer contract.
+LexonArchiveBuilder SHALL provide an explicit delegated clustering provider,
+delegated clustering mode, and delegated clustering algorithm selection that
+satisfies the updated LexonGraph streaming indexer contract.
 
 - **Upstream contract [KNOWN]:** The delegated streaming indexer now requires the
-  caller to choose an aggregation-based or divisive clustering mode, choose a
-  built-in planning configuration within the upstream-supported matrix, and pass
-  the corresponding algorithm-specific settings rather than relying on one
-  implicit clustering realization or the retired built-in clustering-factory
-  seam.
+  caller to choose among the upstream-supported clustering provider families,
+  choose an aggregation-based or divisive clustering mode when required by the
+  selected provider, choose a planning configuration within the upstream-
+  supported matrix, and pass the corresponding algorithm-specific settings
+  rather than relying on one implicit clustering realization or the retired
+  built-in clustering-factory seam.
+- **Default provider [KNOWN]:** When the caller omits clustering provider,
+  LexonArchiveBuilder SHALL default to the adapter clustering planner.
 - **Default mode [KNOWN]:** When the caller omits clustering mode,
   LexonArchiveBuilder SHALL default to aggregation-based clustering.
 - **Current built-in algorithms [KNOWN]:**
   - `dcbc`
   - `directional-pca`
+  - `adaptive`
+- **Adaptive-policy meaning [KNOWN]:** When the caller selects built-in
+  `adaptive`, LexonArchiveBuilder SHALL preserve the upstream adaptive policy
+  semantics in which directional PCA is used first and the policy may switch to
+  DCBC when the adaptive switch criteria require it.
 - **Compatibility rule [INFERRED]:** LexonArchiveBuilder SHALL preserve the
-  existing algorithm-specific control families when the selected clustering mode
-  and the upstream contract support the chosen algorithm, and SHALL fail
-  explicitly rather than silently remapping or ignoring unsupported
-  mode-and-algorithm combinations.
+  existing algorithm-specific control families when the selected clustering
+  provider, selected clustering mode, and the upstream contract support the
+  chosen algorithm, and SHALL fail explicitly rather than silently remapping or
+  ignoring unsupported provider, mode, and algorithm combinations.
 - **Stage boundary [KNOWN]:** This requirement applies to the `full` and
   `clustering+block-assembly` execution stages and does not affect
   `ingestion+embedding` execution.
 - **Delegation boundary [KNOWN]:** LexonArchiveBuilder still delegates all actual
   planning and clustering behavior to LexonGraph and does not define
-  repository-local planning, clustering modes, or clustering algorithms in this
-  increment.
+  repository-local planning providers, clustering modes, or clustering
+  algorithms in this increment.
 - **Default policy [KNOWN]:** When the caller omits clustering configuration,
-  LexonArchiveBuilder SHALL apply a repository-owned default mode, default
-  algorithm, and default option values that remain compatible with the upstream
-  contract.
-- **Compatibility note [KNOWN]:** The latest known upstream built-in planning
-  seam continues to expose `dcbc` and `directional-pca` as repository-relevant
-  built-in choices, but LexonArchiveBuilder must now bind those choices through
-  the planning-policy contract together with the selected clustering mode rather
-  than through `BuiltInClusteringFactory`.
-- **Traceability:** UR-39, UR-44, UR-50, UR-52, UR-53, UR-61, UR-62, UR-65, UR-114, UR-115, UR-116, UR-120
+  LexonArchiveBuilder SHALL apply a repository-owned default provider, default
+  mode, default algorithm, and default option values that remain compatible
+  with the upstream contract.
+- **Compatibility note [KNOWN]:** The latest known upstream planning surface
+  continues to expose `dcbc`, `directional-pca`, and `adaptive` as
+  repository-relevant built-in choices, and the newer adapter clustering
+  planner is now a repository-relevant provider choice; LexonArchiveBuilder
+  must bind those choices through the upstream planning-policy contract rather
+  than through an implied single-provider path.
+- **Traceability:** UR-39, UR-44, UR-50, UR-52, UR-53, UR-61, UR-62, UR-65, UR-114, UR-115, UR-116, UR-120, UR-121, UR-122, UR-123, UR-124, UR-125, UR-126
 
-#### RQ-INDEXER-003G - Clustering mode and algorithm-specific options on the CLI
+#### RQ-INDEXER-003G - Clustering provider, mode, and algorithm-specific options on the CLI
 
 LexonArchiveBuilder SHALL expose command-line arguments that let operators
-select the delegated clustering mode, select the delegated clustering
-algorithm, and provide supported algorithm-specific option values for
-clustering-enabled execution.
+select the delegated clustering provider, select the delegated clustering mode,
+select the delegated clustering algorithm, and provide supported algorithm-
+specific option values for clustering-enabled execution.
 
 - **Required surface [KNOWN]:** The CLI must let the caller choose among the
-  supported delegated clustering modes and delegated clustering algorithms and
-  set supported option values without modifying Rust code or request fixtures.
+  supported delegated clustering providers, delegated clustering modes, and
+  delegated clustering algorithms and set supported option values without
+  modifying Rust code or request fixtures.
 - **Algorithm-family boundary [KNOWN]:** LexonArchiveBuilder SHALL expose only the
   options actually supported by the selected delegated clustering algorithm.
   Shared options may be reused across algorithms, but algorithm-specific
   options must remain explicit rather than silently ignored.
+- **Adaptive-option boundary [KNOWN]:** When the selected delegated clustering
+  algorithm is `adaptive`, the CLI SHALL expose the upstream-supported adaptive
+  switch criteria plus the directional-PCA and DCBC option families required by
+  that adaptive policy rather than collapsing adaptive planning to one hidden
+  repository preset.
 - **Mode boundary [KNOWN]:** LexonArchiveBuilder SHALL expose only the delegated
-  algorithms and option combinations that are valid for the selected clustering
-  mode on the upstream contract.
+  algorithms and option combinations that are valid for the selected
+  clustering provider and selected clustering mode on the upstream contract.
 - **Validation rule [INFERRED]:** Supplying an option that is unsupported by the
-  selected mode or selected algorithm SHALL fail explicitly rather than being
-  dropped or reinterpreted as a different option.
+  selected provider, selected mode, or selected algorithm SHALL fail explicitly
+  rather than being dropped or reinterpreted as a different option.
 - **Environment-parity implication [INFERRED]:** The same CLI surface must remain
   usable for local/testing and production-shaped batch invocations so
   environment selection does not introduce a separate clustering-configuration
   interface family.
 - **[UNKNOWN: whether this increment also requires equivalent request-file
   fields in `BatchRequest` rather than CLI-only exposure]**
-- **Traceability:** UR-4, UR-12, UR-13, UR-50, UR-51, UR-52, UR-53, UR-114, UR-115, UR-119, UR-120
+- **Traceability:** UR-4, UR-12, UR-13, UR-50, UR-51, UR-52, UR-53, UR-114, UR-115, UR-119, UR-120, UR-121, UR-122, UR-123, UR-124, UR-125, UR-126
 
 #### RQ-INDEXER-003H - Auto-sized omitted cluster count
 
@@ -680,7 +713,7 @@ and the maximum parent-branch capacity implied by the active embedding
 specification and block-size target.
 
 - **Applicability [KNOWN]:** This omitted-option derivation rule SHALL apply to
-  every supported built-in clustering algorithm, including `dcbc` and
+  every supported fixed built-in clustering algorithm, including `dcbc` and
   `directional-pca`, rather than being limited to one algorithm family.
 - **Override rule [KNOWN]:** When the caller explicitly supplies
   `cluster_count`, LexonArchiveBuilder SHALL honor that explicit value instead
@@ -710,7 +743,7 @@ behavior.
   - the external stage contract (`full`, `ingestion+embedding`, `clustering+block-assembly`)
   - deterministic split-stage replay acceptance
   - explicit clustering-mode selection with aggregation as the default and divisive as an opt-in
-  - explicit built-in algorithm selection for `dcbc` and `directional-pca`
+  - explicit built-in algorithm selection for `dcbc`, `directional-pca`, and `adaptive`
   - omitted `cluster_count` auto-sizing with explicit override preservation
   - runtime progress projection that keeps raw upstream lifecycle details behind the repository-owned progress surface
   - projection of the latest upstream live telemetry and heartbeat events onto that same repository-owned progress surface
@@ -1180,7 +1213,7 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 | Local development remains self-contained and batch-oriented | Preserved | Docker Compose is constrained to compose local dependencies around the batch container rather than changing the runtime model |
 | Long-running batches remain observable without adding a control plane | Preserved with clarified scope | Progress reporting remains on the existing batch-runtime log surface and now explicitly includes the long-running embedding or leaf-materialization gap between mailbox expansion and downstream streaming-status visibility plus clustering-only replay submission progress, the handoff into upstream planning-pass waiting, and failure-only clustering diagnostics on the runtime log plus a request-adjacent artifact |
 | Caller-visible indexing and MCP contracts remain stable across the upstream API migration | Preserved | The streaming lifecycle is constrained to an internal adaptation behind the existing stage surface and unchanged MCP retrieval semantics |
-| Clustering configuration remains explicit and replayable | Preserved with clarified scope | Requirements now treat the effective clustering mode, algorithm, and option set as part of clustering-enabled orchestration input and constrain defaults to resolve deterministically |
+| Clustering configuration remains explicit and replayable | Preserved with clarified scope | Requirements now treat the effective clustering provider, mode, algorithm, and option set as part of clustering-enabled orchestration input and constrain defaults to resolve deterministically |
 | Omitted clustering-size behavior remains deterministic and safe across algorithms | Preserved with clarified scope | Requirements now constrain omitted `cluster_count` to derive from input count plus embedding-aware branch capacity for every supported built-in algorithm while preserving explicit caller override behavior |
 | Required repository capabilities remain distinguishable from upstream regressions during the latest upgrade | Preserved with clarified scope | The requirements now force the upgrade to classify missing capabilities explicitly instead of silently narrowing split-stage replay, planning-policy mapping, progress projection, or MCP-facing behavior |
 | Latest upstream telemetry remains subordinate to the existing runtime progress surface | Preserved with clarified scope | Requirements now constrain richer live telemetry and heartbeat events to the same repository-owned log stream rather than a new telemetry interface |
@@ -1205,6 +1238,8 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
 - **Q-INDEXER-068 [UNKNOWN]:** Should the rooted CLI search tool treat the caller-supplied embedding endpoint as the complete query-embedding configuration, or must it also accept repository-specific embedding-spec inputs such as dimensions or encoding overrides at the CLI boundary?
 - **Q-INDEXER-069 [UNKNOWN]:** For corpus-based TNN-recall histograms, should a future increment keep repository-owned default histogram buckets or expose bucket configuration as an operator-visible parameter?
 - **Q-INDEXER-070 [UNKNOWN]:** What is the exact upstream-supported compatibility matrix between aggregation-based versus divisive clustering mode and the repository-relevant built-in algorithms such as `dcbc` and `directional-pca`?
+- **Q-INDEXER-071 [UNKNOWN]:** What is the exact upstream-supported compatibility matrix between the adapter clustering planner and the repository-relevant clustering mode, algorithm, and option families already exposed by LexonArchiveBuilder?
+- **Q-INDEXER-072 [UNKNOWN]:** What exact repository-owned defaults and omitted-option resolution rules should apply to the adaptive policy's switch criteria and branch-specific directional-PCA/DCBC settings when the caller selects `adaptive`?
 
 ## Coverage Notes
 
@@ -1215,6 +1250,9 @@ LexonArchiveBuilder SHALL keep content resolution, block storage, and embedding-
   - user clarification in this session selecting: "Uniform content-type-agnostic control (Recommended)"
   - user clarification in this session selecting: "Yes, keep the same contract and default across environments (Recommended)"
   - user clarification in this session selecting: "Yes, that is the acceptance target (Recommended)"
+  - user request in this session: "lexongraph now has a new clustering provider, the adapter clustering planner. Please expose this as the new default option."
+  - user request in this session: "fix this gap"
+  - user clarification in this session selecting: "Expose `adaptive` as an explicit built-in clustering algorithm alongside `dcbc` and `directional-pca` (Recommended)"
   - user request in this session: "another requirement: Add an option to allow the user to provide a text string and an embedding endpoint, then generate an embedding, search using the lexongraph-search api, and return the top k matching leaf nodes. The MCP server already does something similar, but I want an easy cli tool to do it as well"
   - user clarification in this session selecting: "Caller-supplied root/tree (Recommended)"
   - user clarification in this session selecting: "Human-readable results plus machine-readable JSON output (Recommended)"
@@ -1306,6 +1344,10 @@ This metric SHALL be used to detect multimodal blocks and ineffective splits."
     `crates/lexongraph-streaming-indexer/src/lib.rs:499-507`
   - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
     `crates/lexongraph-streaming-indexer/src/lib.rs:799-807`
+  - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
+    `crates/lexongraph-streaming-indexer/src/lib.rs:398-402`
+  - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
+    `crates/lexongraph-adaptive-planning-policy/src/lib.rs:18-50`
   - external LexonGraph repository source (not vendored in LexonArchiveBuilder):
     `crates/lexongraph-block-store/src/lib.rs:28-32`
   - external LexonGraph repository source (not vendored in LexonArchiveBuilder):

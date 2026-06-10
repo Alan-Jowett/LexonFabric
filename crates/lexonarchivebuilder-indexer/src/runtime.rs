@@ -12,10 +12,13 @@ use lexongraph_block::{
 use lexongraph_block_store::{BlockStore, BlockStoreError};
 use lexongraph_embeddings_trait::{EmbeddingInput, EmbeddingProvider};
 use lexongraph_streaming_indexer::{
+    AdaptiveDcbcSettings, AdaptiveDivisiveSwitchSettings, AdaptivePlanningDecisionReason,
+    AdaptivePlanningDirection, AdaptivePlanningSettings, AdaptivePlanningStatusTelemetry,
     ArithmeticMeanCanonicalEmbeddingPolicy, BuiltInPlanning, BuiltInPlanningDirection,
-    ContentResolver, DcbcBuiltInPlanningSettings, DirectionalPcaBuiltInPlanningSettings, IndexItem,
-    PlanningStage, StreamingIndexerError, StreamingIndexingPhase, StreamingIndexingRun,
-    StreamingIndexingStatus, StreamingIndexingStatusObserver, StreamingIndexingStatusState,
+    ContentResolver, DcbcBuiltInPlanningSettings, DcbcStreamingClusteringFactory,
+    DirectionalPcaBuiltInPlanningSettings, HierarchicalPlanningPolicy, IndexItem, PlanningStage,
+    StreamingIndexerError, StreamingIndexingPhase, StreamingIndexingRun, StreamingIndexingStatus,
+    StreamingIndexingStatusObserver, StreamingIndexingStatusState,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -25,7 +28,7 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior, interval_at};
 use crate::block_store::ConfiguredBlockStore;
 use crate::config::{
     BatchItemConfig, BatchRequest, BatchSummary, ClusteringConfigOverrides, ClusteringMode,
-    ConfigError, ConfiguredClustering, ExecutionStage, metadata_to_text_map,
+    ClusteringProvider, ConfigError, ConfiguredClustering, ExecutionStage, metadata_to_text_map,
 };
 use crate::embedding::{ConfiguredEmbeddingProvider, ConfiguredEmbeddingProviderError};
 use crate::mailbox::{MailboxExpansionError, expand_mailbox_item_with_stats};
@@ -81,12 +84,14 @@ struct ClusteringFailureEmbeddingSpec {
 #[serde(tag = "algorithm", rename_all = "kebab-case")]
 enum EffectiveClusteringDiagnostics {
     Dcbc {
+        provider: ClusteringProvider,
         mode: ClusteringMode,
         cluster_count: u32,
         random_seed: Option<u64>,
         balance_constraints: Option<BalanceConstraintsDiagnostics>,
     },
     DirectionalPca {
+        provider: ClusteringProvider,
         mode: ClusteringMode,
         cluster_count: u32,
         random_seed: Option<u64>,
@@ -97,6 +102,21 @@ enum EffectiveClusteringDiagnostics {
         min_effective_rank: usize,
         min_cumulative_variance: f32,
     },
+    Adaptive {
+        provider: ClusteringProvider,
+        mode: ClusteringMode,
+        cluster_count: u32,
+        random_seed: Option<u64>,
+        retained_dimension_count: usize,
+        variance_exponent: f32,
+        temperature: f32,
+        min_input_count: usize,
+        min_effective_rank: usize,
+        min_cumulative_variance: f32,
+        balance_constraints: Option<BalanceConstraintsDiagnostics>,
+        pc1_explained_variance_ratio_threshold: f32,
+        dcbc_max_embedding_count: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -105,6 +125,11 @@ struct BalanceConstraintsDiagnostics {
     max_cluster_occupancy: Option<u32>,
     max_cluster_size_ratio: Option<f64>,
     soft_balance_penalty: Option<f64>,
+}
+
+enum ResolvedPlanning {
+    BuiltIn(BuiltInPlanning),
+    AdapterDcbc { cluster_count: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -550,12 +575,115 @@ fn resolved_built_in_planning(
 ) -> Result<BuiltInPlanning, AutoSizingBuiltInPlanningError> {
     Ok(match clustering {
         ConfiguredClustering::Dcbc {
+            provider,
             mode,
             cluster_count,
             balance_constraints,
             random_seed,
-        } => BuiltInPlanning::Dcbc(DcbcBuiltInPlanningSettings {
-            direction: built_in_planning_direction(*mode),
+        } => {
+            if *provider != ClusteringProvider::BuiltIn {
+                return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(
+                    "adapter clustering planner does not map to BuiltInPlanning".into(),
+                ));
+            }
+            BuiltInPlanning::Dcbc(DcbcBuiltInPlanningSettings {
+                direction: built_in_planning_direction(*mode),
+                cluster_count: resolve_cluster_count(
+                    *cluster_count,
+                    1,
+                    estimated_child_count,
+                    block_size_target,
+                    embedding_spec,
+                )?,
+                balance_constraints: balance_constraints.clone(),
+                random_seed: *random_seed,
+            })
+        }
+        ConfiguredClustering::DirectionalPca {
+            provider,
+            mode,
+            cluster_count,
+            random_seed,
+            params,
+        } => {
+            if *provider != ClusteringProvider::BuiltIn {
+                return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(
+                    "adapter clustering planner does not support directional-pca".into(),
+                ));
+            }
+            BuiltInPlanning::DirectionalPca(DirectionalPcaBuiltInPlanningSettings {
+                direction: built_in_planning_direction(*mode),
+                cluster_count: resolve_cluster_count(
+                    *cluster_count,
+                    params.retained_dimension_count.max(1),
+                    estimated_child_count,
+                    block_size_target,
+                    embedding_spec,
+                )?,
+                random_seed: *random_seed,
+                params: params.clone(),
+            })
+        }
+        ConfiguredClustering::Adaptive {
+            provider,
+            mode,
+            cluster_count,
+            random_seed,
+            balance_constraints,
+            params,
+            pc1_explained_variance_ratio_threshold,
+            dcbc_max_embedding_count,
+        } => {
+            if *provider != ClusteringProvider::BuiltIn {
+                return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(
+                    "adapter clustering planner does not support adaptive".into(),
+                ));
+            }
+            BuiltInPlanning::Adaptive(AdaptivePlanningSettings {
+                direction: adaptive_planning_direction(*mode),
+                directional_pca: lexongraph_streaming_indexer::AdaptiveDirectionalPcaSettings {
+                    cluster_count: resolve_cluster_count(
+                        *cluster_count,
+                        params.retained_dimension_count.max(1),
+                        estimated_child_count,
+                        block_size_target,
+                        embedding_spec,
+                    )?,
+                    random_seed: *random_seed,
+                    params: params.clone(),
+                },
+                dcbc: AdaptiveDcbcSettings {
+                    cluster_count: resolve_cluster_count(
+                        *cluster_count,
+                        1,
+                        estimated_child_count,
+                        block_size_target,
+                        embedding_spec,
+                    )?,
+                    balance_constraints: balance_constraints.clone(),
+                    random_seed: *random_seed,
+                },
+                divisive_switch: AdaptiveDivisiveSwitchSettings {
+                    pc1_explained_variance_ratio_threshold: *pc1_explained_variance_ratio_threshold,
+                    dcbc_max_embedding_count: *dcbc_max_embedding_count,
+                },
+            })
+        }
+    })
+}
+
+fn resolved_planning(
+    clustering: &ConfiguredClustering,
+    estimated_child_count: usize,
+    block_size_target: usize,
+    embedding_spec: &EmbeddingSpec,
+) -> Result<ResolvedPlanning, AutoSizingBuiltInPlanningError> {
+    match clustering {
+        ConfiguredClustering::Dcbc {
+            provider: ClusteringProvider::AdapterClusteringPlanner,
+            cluster_count,
+            ..
+        } => Ok(ResolvedPlanning::AdapterDcbc {
             cluster_count: resolve_cluster_count(
                 *cluster_count,
                 1,
@@ -563,33 +691,27 @@ fn resolved_built_in_planning(
                 block_size_target,
                 embedding_spec,
             )?,
-            balance_constraints: balance_constraints.clone(),
-            random_seed: *random_seed,
         }),
-        ConfiguredClustering::DirectionalPca {
-            mode,
-            cluster_count,
-            random_seed,
-            params,
-        } => BuiltInPlanning::DirectionalPca(DirectionalPcaBuiltInPlanningSettings {
-            direction: built_in_planning_direction(*mode),
-            cluster_count: resolve_cluster_count(
-                *cluster_count,
-                params.retained_dimension_count.max(1),
-                estimated_child_count,
-                block_size_target,
-                embedding_spec,
-            )?,
-            random_seed: *random_seed,
-            params: params.clone(),
-        }),
-    })
+        _ => Ok(ResolvedPlanning::BuiltIn(resolved_built_in_planning(
+            clustering,
+            estimated_child_count,
+            block_size_target,
+            embedding_spec,
+        )?)),
+    }
 }
 
 fn built_in_planning_direction(mode: ClusteringMode) -> BuiltInPlanningDirection {
     match mode {
         ClusteringMode::Aggregation => BuiltInPlanningDirection::Agglomerative,
         ClusteringMode::Divisive => BuiltInPlanningDirection::Divisive,
+    }
+}
+
+fn adaptive_planning_direction(mode: ClusteringMode) -> AdaptivePlanningDirection {
+    match mode {
+        ClusteringMode::Aggregation => AdaptivePlanningDirection::Agglomerative,
+        ClusteringMode::Divisive => AdaptivePlanningDirection::Divisive,
     }
 }
 
@@ -651,49 +773,126 @@ fn effective_clustering_diagnostics(
     block_size_target: usize,
     embedding_spec: &EmbeddingSpec,
 ) -> Option<EffectiveClusteringDiagnostics> {
-    let clustering = resolved_built_in_planning(
-        clustering,
-        estimated_child_count,
-        block_size_target,
-        embedding_spec,
-    )
-    .ok()?;
     Some(match clustering {
-        BuiltInPlanning::Dcbc(DcbcBuiltInPlanningSettings {
-            direction,
+        ConfiguredClustering::Dcbc {
+            provider: ClusteringProvider::AdapterClusteringPlanner,
+            mode,
             cluster_count,
-            balance_constraints,
-            random_seed,
-        }) => EffectiveClusteringDiagnostics::Dcbc {
-            mode: clustering_mode_from_direction(direction),
-            cluster_count,
-            random_seed,
-            balance_constraints: balance_constraints.map(|constraints| {
-                BalanceConstraintsDiagnostics {
-                    min_cluster_occupancy: constraints.min_cluster_occupancy,
-                    max_cluster_occupancy: constraints.max_cluster_occupancy,
-                    max_cluster_size_ratio: constraints.max_cluster_size_ratio,
-                    soft_balance_penalty: constraints.soft_balance_penalty,
-                }
-            }),
+            ..
+        } => EffectiveClusteringDiagnostics::Dcbc {
+            provider: ClusteringProvider::AdapterClusteringPlanner,
+            mode: *mode,
+            cluster_count: resolve_cluster_count(
+                *cluster_count,
+                1,
+                estimated_child_count,
+                block_size_target,
+                embedding_spec,
+            )
+            .ok()?,
+            random_seed: None,
+            balance_constraints: None,
         },
-        BuiltInPlanning::DirectionalPca(DirectionalPcaBuiltInPlanningSettings {
-            direction,
-            cluster_count,
-            random_seed,
-            params,
-        }) => EffectiveClusteringDiagnostics::DirectionalPca {
-            mode: clustering_mode_from_direction(direction),
-            cluster_count,
-            random_seed,
-            retained_dimension_count: params.retained_dimension_count,
-            variance_exponent: params.variance_exponent,
-            temperature: params.temperature,
-            min_input_count: params.min_input_count,
-            min_effective_rank: params.min_effective_rank,
-            min_cumulative_variance: params.min_cumulative_variance,
-        },
-        BuiltInPlanning::Hybrid(_) => return None,
+        ConfiguredClustering::Dcbc { provider, .. }
+        | ConfiguredClustering::DirectionalPca { provider, .. } => {
+            let clustering = resolved_built_in_planning(
+                clustering,
+                estimated_child_count,
+                block_size_target,
+                embedding_spec,
+            )
+            .ok()?;
+            match clustering {
+                BuiltInPlanning::Dcbc(DcbcBuiltInPlanningSettings {
+                    direction,
+                    cluster_count,
+                    balance_constraints,
+                    random_seed,
+                }) => EffectiveClusteringDiagnostics::Dcbc {
+                    provider: *provider,
+                    mode: clustering_mode_from_direction(direction),
+                    cluster_count,
+                    random_seed,
+                    balance_constraints: balance_constraints.map(|constraints| {
+                        BalanceConstraintsDiagnostics {
+                            min_cluster_occupancy: constraints.min_cluster_occupancy,
+                            max_cluster_occupancy: constraints.max_cluster_occupancy,
+                            max_cluster_size_ratio: constraints.max_cluster_size_ratio,
+                            soft_balance_penalty: constraints.soft_balance_penalty,
+                        }
+                    }),
+                },
+                BuiltInPlanning::DirectionalPca(DirectionalPcaBuiltInPlanningSettings {
+                    direction,
+                    cluster_count,
+                    random_seed,
+                    params,
+                }) => EffectiveClusteringDiagnostics::DirectionalPca {
+                    provider: *provider,
+                    mode: clustering_mode_from_direction(direction),
+                    cluster_count,
+                    random_seed,
+                    retained_dimension_count: params.retained_dimension_count,
+                    variance_exponent: params.variance_exponent,
+                    temperature: params.temperature,
+                    min_input_count: params.min_input_count,
+                    min_effective_rank: params.min_effective_rank,
+                    min_cumulative_variance: params.min_cumulative_variance,
+                },
+                BuiltInPlanning::Adaptive(_) => return None,
+                BuiltInPlanning::Hybrid(_) => return None,
+            }
+        }
+        ConfiguredClustering::Adaptive {
+            provider,
+            pc1_explained_variance_ratio_threshold,
+            dcbc_max_embedding_count,
+            ..
+        } => {
+            let clustering = resolved_built_in_planning(
+                clustering,
+                estimated_child_count,
+                block_size_target,
+                embedding_spec,
+            )
+            .ok()?;
+            match clustering {
+                BuiltInPlanning::Adaptive(settings) => EffectiveClusteringDiagnostics::Adaptive {
+                    provider: *provider,
+                    mode: match settings.direction {
+                        AdaptivePlanningDirection::Agglomerative => ClusteringMode::Aggregation,
+                        AdaptivePlanningDirection::Divisive => ClusteringMode::Divisive,
+                    },
+                    cluster_count: settings.directional_pca.cluster_count,
+                    random_seed: settings.directional_pca.random_seed,
+                    retained_dimension_count: settings
+                        .directional_pca
+                        .params
+                        .retained_dimension_count,
+                    variance_exponent: settings.directional_pca.params.variance_exponent,
+                    temperature: settings.directional_pca.params.temperature,
+                    min_input_count: settings.directional_pca.params.min_input_count,
+                    min_effective_rank: settings.directional_pca.params.min_effective_rank,
+                    min_cumulative_variance: settings
+                        .directional_pca
+                        .params
+                        .min_cumulative_variance,
+                    balance_constraints: settings.dcbc.balance_constraints.map(|constraints| {
+                        BalanceConstraintsDiagnostics {
+                            min_cluster_occupancy: constraints.min_cluster_occupancy,
+                            max_cluster_occupancy: constraints.max_cluster_occupancy,
+                            max_cluster_size_ratio: constraints.max_cluster_size_ratio,
+                            soft_balance_penalty: constraints.soft_balance_penalty,
+                        }
+                    }),
+                    pc1_explained_variance_ratio_threshold: *pc1_explained_variance_ratio_threshold,
+                    dcbc_max_embedding_count: *dcbc_max_embedding_count,
+                },
+                BuiltInPlanning::Dcbc(_) => return None,
+                BuiltInPlanning::DirectionalPca(_) => return None,
+                BuiltInPlanning::Hybrid(_) => return None,
+            }
+        }
     })
 }
 
@@ -1816,46 +2015,32 @@ async fn construct_leaf_block_batch(
     Ok(constructed)
 }
 
-async fn run_streaming_stage<EP>(
-    resolver: LocalFilesystemContentResolver,
-    embedding_provider: EP,
+#[allow(clippy::too_many_arguments)]
+async fn drive_streaming_indexer<EP, HPP>(
+    mut indexer: StreamingIndexingRun<
+        ContentRef,
+        LocalFilesystemContentResolver,
+        EP,
+        ArithmeticMeanCanonicalEmbeddingPolicy,
+        HPP,
+    >,
     config: StreamingStageConfig,
     replay_batches: Vec<ReplayBatch>,
     block_store: &ConfiguredBlockStore,
     embedding_spec: &EmbeddingSpec,
     progress: &ProgressReporter,
+    latest_failed_status: Arc<Mutex<Option<StreamingIndexingStatus>>>,
+    diagnostics_resolver: LocalFilesystemContentResolver,
+    diagnostics_embedding_provider: EP,
+    clustering_failure_diagnostics: OnceLock<Option<ClusteringFailureDiagnostics>>,
 ) -> Result<BatchSummary, RuntimeError>
 where
     EP: EmbeddingProvider + ClusteringFailureEmbeddingSource + Clone,
+    HPP: HierarchicalPlanningPolicy,
+    HPP::Error: 'static,
 {
-    let latest_failed_status = Arc::new(Mutex::new(None));
-    let observer = Some(make_status_observer(
-        Arc::clone(progress),
-        Arc::clone(&latest_failed_status),
-    ));
     let total_batches = replay_batches.len();
     let total_items: usize = replay_batches.iter().map(|batch| batch.items.len()).sum();
-    let clustering_failure_diagnostics = OnceLock::new();
-    let diagnostics_resolver = resolver.clone();
-    let diagnostics_embedding_provider = embedding_provider.clone();
-
-    let mut indexer = StreamingIndexingRun::with_canonical_policy(
-        resolver,
-        embedding_provider,
-        ArithmeticMeanCanonicalEmbeddingPolicy,
-        resolved_built_in_planning(
-            &config.clustering,
-            total_items,
-            config.block_size_target,
-            embedding_spec,
-        )?,
-        embedding_spec.clone(),
-        config.block_size_target,
-    );
-    if let Some(observer) = observer {
-        indexer = indexer.with_observer(observer);
-    }
-
     let mut completed_items = 0usize;
     for (batch_index, batch) in replay_batches.iter().enumerate() {
         if batch.items.is_empty() {
@@ -1988,6 +2173,87 @@ where
         block_count: block_ids.len(),
         block_ids,
     })
+}
+
+async fn run_streaming_stage<EP>(
+    resolver: LocalFilesystemContentResolver,
+    embedding_provider: EP,
+    config: StreamingStageConfig,
+    replay_batches: Vec<ReplayBatch>,
+    block_store: &ConfiguredBlockStore,
+    embedding_spec: &EmbeddingSpec,
+    progress: &ProgressReporter,
+) -> Result<BatchSummary, RuntimeError>
+where
+    EP: EmbeddingProvider + ClusteringFailureEmbeddingSource + Clone,
+{
+    let latest_failed_status = Arc::new(Mutex::new(None));
+    let total_items: usize = replay_batches.iter().map(|batch| batch.items.len()).sum();
+    let resolved_planning = resolved_planning(
+        &config.clustering,
+        total_items,
+        config.block_size_target,
+        embedding_spec,
+    )?;
+    let clustering_failure_diagnostics = OnceLock::new();
+    let diagnostics_resolver = resolver.clone();
+    let diagnostics_embedding_provider = embedding_provider.clone();
+    match resolved_planning {
+        ResolvedPlanning::BuiltIn(planning) => {
+            let indexer = StreamingIndexingRun::with_canonical_policy(
+                resolver,
+                embedding_provider,
+                ArithmeticMeanCanonicalEmbeddingPolicy,
+                planning,
+                embedding_spec.clone(),
+                config.block_size_target,
+            )
+            .with_observer(make_status_observer(
+                Arc::clone(progress),
+                Arc::clone(&latest_failed_status),
+            ));
+            drive_streaming_indexer(
+                indexer,
+                config,
+                replay_batches,
+                block_store,
+                embedding_spec,
+                progress,
+                latest_failed_status,
+                diagnostics_resolver,
+                diagnostics_embedding_provider,
+                clustering_failure_diagnostics,
+            )
+            .await
+        }
+        ResolvedPlanning::AdapterDcbc { cluster_count } => {
+            let indexer = StreamingIndexingRun::with_streaming_clustering_factory(
+                resolver,
+                embedding_provider,
+                ArithmeticMeanCanonicalEmbeddingPolicy,
+                DcbcStreamingClusteringFactory::new(cluster_count),
+                embedding_spec.clone(),
+                config.block_size_target,
+            )
+            .with_observer(make_status_observer(
+                Arc::clone(progress),
+                Arc::clone(&latest_failed_status),
+            ));
+            drive_streaming_indexer(
+                indexer,
+                config,
+                replay_batches,
+                block_store,
+                embedding_spec,
+                progress,
+                latest_failed_status,
+                diagnostics_resolver,
+                diagnostics_embedding_provider,
+                clustering_failure_diagnostics,
+            )
+            .await
+        }
+    }
 }
 
 async fn await_with_periodic_progress<Fut, T, M>(
@@ -2194,8 +2460,9 @@ fn format_completed_of_total(
 }
 
 fn format_indexing_status(status: StreamingIndexingStatus) -> String {
+    let adaptive_suffix = format_adaptive_planning_status(status.adaptive_planning);
     let elapsed_ms = status.elapsed.as_millis();
-    match (status.phase, status.state) {
+    let message = match (status.phase, status.state) {
         (
             StreamingIndexingPhase::PlanningPass { pass_number },
             StreamingIndexingStatusState::Started,
@@ -2383,6 +2650,182 @@ fn format_indexing_status(status: StreamingIndexingStatus) -> String {
                 status.error.unwrap_or_else(|| "unknown error".into())
             ),
         },
+    };
+    format!("{message}{adaptive_suffix}")
+}
+
+fn format_adaptive_planning_status(
+    adaptive_planning: Option<AdaptivePlanningStatusTelemetry>,
+) -> String {
+    let Some(adaptive_planning) = adaptive_planning else {
+        return String::new();
+    };
+    let decision = adaptive_planning.decision;
+    let detail = match (
+        decision.reason,
+        decision.boundary_position,
+        decision.switch_boundary_occurred,
+    ) {
+        (AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment, 0, _) => {
+            "initial adaptive boundary used directional-pca".to_string()
+        }
+        (
+            AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAbovePc1Threshold,
+            boundary_position,
+            _,
+        )
+        | (
+            AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountLimit,
+            boundary_position,
+            _,
+        ) => format!("adaptive boundary {boundary_position} used directional-pca"),
+        (
+            AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountCutoff,
+            boundary_position,
+            _,
+        ) => format!("adaptive boundary {boundary_position} stayed on directional-pca"),
+        (
+            AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit,
+            boundary_position,
+            true,
+        )
+        | (
+            AdaptivePlanningDecisionReason::SwitchedToDcbcBelowEmbeddingCountCutoff,
+            boundary_position,
+            true,
+        ) => format!("adaptive boundary {boundary_position} switched to dcbc"),
+        (
+            AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit,
+            boundary_position,
+            false,
+        )
+        | (
+            AdaptivePlanningDecisionReason::SwitchedToDcbcBelowEmbeddingCountCutoff,
+            boundary_position,
+            false,
+        ) => format!("adaptive boundary {boundary_position} used dcbc"),
+        (AdaptivePlanningDecisionReason::PreviouslySwitchedToDcbc, boundary_position, _) => {
+            format!("adaptive boundary {boundary_position} stayed on dcbc after an earlier switch")
+        }
+        (AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment, boundary_position, _) => {
+            format!("adaptive boundary {boundary_position} used directional-pca")
+        }
+    };
+    let compared_values = format_adaptive_compared_values(decision);
+    let active_subproblem = format_adaptive_active_subproblem(adaptive_planning.active_subproblem);
+    format!(
+        "; adaptive pass {}: {detail}{compared_values}{active_subproblem}",
+        adaptive_planning.pass_number,
+    )
+}
+
+fn format_adaptive_active_subproblem(
+    active_subproblem: Option<
+        lexongraph_streaming_indexer::AdaptivePlanningActiveSubproblemTelemetry,
+    >,
+) -> String {
+    let Some(active_subproblem) = active_subproblem else {
+        return String::new();
+    };
+
+    let algorithm = match active_subproblem.active_algorithm {
+        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca => "directional-pca",
+        lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc => "dcbc",
+    };
+    let subproblem_position = active_subproblem
+        .active_subproblem_position
+        .map(|position| position.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let total_subproblem_count = active_subproblem
+        .total_subproblem_count
+        .map(|total| total.to_string())
+        .unwrap_or_else(|| "?".into());
+    let nested_progress = format_adaptive_nested_progress(active_subproblem.active_dcbc_progress);
+
+    format!(
+        "; active {algorithm} subproblem {subproblem_position} after completing {} of {total_subproblem_count} subproblem(s){nested_progress}",
+        active_subproblem.completed_subproblem_count,
+    )
+}
+
+fn format_adaptive_nested_progress(
+    nested_progress: Option<lexongraph_streaming_indexer::AdaptivePlanningNestedProgressTelemetry>,
+) -> String {
+    let Some(nested_progress) = nested_progress else {
+        return String::new();
+    };
+    match (
+        nested_progress.completed_unit_count,
+        nested_progress.total_unit_count,
+    ) {
+        (Some(completed), Some(total)) => {
+            format!("; dcbc progress {completed} of {total} unit(s)")
+        }
+        (Some(completed), None) => format!("; dcbc progress {completed} unit(s)"),
+        (None, Some(total)) => format!("; dcbc total {total} unit(s)"),
+        (None, None) => String::new(),
+    }
+}
+
+fn format_adaptive_compared_values(
+    decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry,
+) -> String {
+    match decision.reason {
+        AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment
+        | AdaptivePlanningDecisionReason::PreviouslySwitchedToDcbc => String::new(),
+        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAbovePc1Threshold => {
+            let (Some(pc1), Some(threshold)) = (
+                decision.pc1_explained_variance_ratio,
+                decision.pc1_explained_variance_ratio_threshold,
+            ) else {
+                return String::new();
+            };
+            format!(
+                " (pc1_explained_variance_ratio={pc1:.6} >= threshold={threshold:.6})"
+            )
+        }
+        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountLimit => {
+            let (Some(pc1), Some(threshold), Some(embedding_count), Some(limit)) = (
+                decision.pc1_explained_variance_ratio,
+                decision.pc1_explained_variance_ratio_threshold,
+                decision.embedding_count,
+                decision.dcbc_max_embedding_count,
+            ) else {
+                return String::new();
+            };
+            format!(
+                " (pc1_explained_variance_ratio={pc1:.6} < threshold={threshold:.6}; embedding_count={embedding_count} >= dcbc_max_embedding_count={limit})"
+            )
+        }
+        AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit => {
+            let (Some(pc1), Some(threshold), Some(embedding_count), Some(limit)) = (
+                decision.pc1_explained_variance_ratio,
+                decision.pc1_explained_variance_ratio_threshold,
+                decision.embedding_count,
+                decision.dcbc_max_embedding_count,
+            ) else {
+                return String::new();
+            };
+            format!(
+                " (pc1_explained_variance_ratio={pc1:.6} < threshold={threshold:.6}; embedding_count={embedding_count} < dcbc_max_embedding_count={limit})"
+            )
+        }
+        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountCutoff => {
+            let (Some(embedding_count), Some(cutoff)) =
+                (decision.embedding_count, decision.dcbc_max_embedding_count)
+            else {
+                return String::new();
+            };
+            format!(" (embedding_count={embedding_count} >= cutoff={cutoff})")
+        }
+        AdaptivePlanningDecisionReason::SwitchedToDcbcBelowEmbeddingCountCutoff => {
+            let (Some(embedding_count), Some(cutoff)) =
+                (decision.embedding_count, decision.dcbc_max_embedding_count)
+            else {
+                return String::new();
+            };
+            format!(" (embedding_count={embedding_count} < cutoff={cutoff})")
+        }
     }
 }
 
@@ -2954,6 +3397,7 @@ mod tests {
             temp.path(),
             request,
             ClusteringConfigOverrides {
+                clustering_provider: Some(ClusteringProvider::BuiltIn),
                 clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
                 clustering_cluster_count: Some(2),
                 clustering_retained_dimension_count: Some(1),
@@ -3063,6 +3507,7 @@ mod tests {
             &request_path,
             None,
             ClusteringConfigOverrides {
+                clustering_provider: Some(ClusteringProvider::BuiltIn),
                 clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
                 clustering_cluster_count: Some(2),
                 clustering_retained_dimension_count: Some(1),
@@ -3116,6 +3561,7 @@ mod tests {
             temp.path(),
             request,
             ClusteringConfigOverrides {
+                clustering_provider: Some(ClusteringProvider::BuiltIn),
                 clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
                 clustering_cluster_count: Some(2),
                 clustering_retained_dimension_count: Some(1),
@@ -3550,6 +3996,7 @@ mod tests {
             &request_path,
             None,
             ClusteringConfigOverrides {
+                clustering_provider: Some(ClusteringProvider::BuiltIn),
                 clustering_mode: Some(ClusteringMode::Divisive),
                 clustering_algorithm: Some(ClusteringAlgorithm::Dcbc),
                 clustering_cluster_count: Some(2),
@@ -3604,6 +4051,7 @@ mod tests {
             &request_path,
             None,
             ClusteringConfigOverrides {
+                clustering_provider: Some(ClusteringProvider::BuiltIn),
                 clustering_mode: Some(ClusteringMode::Aggregation),
                 clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
                 clustering_cluster_count: Some(2),
@@ -3613,6 +4061,69 @@ mod tests {
                 clustering_min_input_count: Some(2),
                 clustering_min_effective_rank: Some(1),
                 clustering_min_cumulative_variance: Some(0.0),
+                ..ClusteringConfigOverrides::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!summary.block_ids.is_empty());
+        server.join();
+    }
+
+    #[tokio::test]
+    async fn explicit_adaptive_clustering_runs_end_to_end() {
+        let temp = tempdir().unwrap();
+        for name in ["alpha", "beta", "gamma"] {
+            fs::write(temp.path().join(format!("{name}.txt")), format!("{name}\n")).unwrap();
+        }
+
+        let server = spawn_distinct_embedding_server(3);
+        let request_path = temp.path().join("request.json");
+        fs::write(
+            &request_path,
+            serde_json::to_vec_pretty(&json!({
+                "environment": {
+                    "kind": "local",
+                    "block_store_root": "blocks",
+                    "embedding": {
+                        "base_url": server.base_url,
+                        "model": "all-MiniLM-L6-v2",
+                        "request_timeout_secs": 5,
+                        "max_retries": 0,
+                        "retry_delay_ms": 1
+                    }
+                },
+                "embedding_spec": {
+                    "dims": 2,
+                    "encoding": "f32le"
+                },
+                "items": [
+                    { "kind": "document", "path": "alpha.txt" },
+                    { "kind": "document", "path": "beta.txt" },
+                    { "kind": "document", "path": "gamma.txt" }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let summary = run_request_file_with_overrides(
+            &request_path,
+            None,
+            ClusteringConfigOverrides {
+                clustering_provider: Some(ClusteringProvider::BuiltIn),
+                clustering_mode: Some(ClusteringMode::Aggregation),
+                clustering_algorithm: Some(ClusteringAlgorithm::Adaptive),
+                clustering_cluster_count: Some(2),
+                clustering_retained_dimension_count: Some(1),
+                clustering_variance_exponent: Some(1.0),
+                clustering_temperature: Some(1.0),
+                clustering_min_input_count: Some(2),
+                clustering_min_effective_rank: Some(1),
+                clustering_min_cumulative_variance: Some(0.0),
+                clustering_pc1_explained_variance_ratio_threshold: Some(0.25),
+                clustering_dcbc_max_embedding_count: Some(2),
                 ..ClusteringConfigOverrides::default()
             },
         )
@@ -3875,6 +4386,7 @@ mod tests {
         let block_size_target = serialized_branch_size(&embedding_spec, 3).unwrap();
         let omitted = resolved_built_in_planning(
             &ConfiguredClustering::DirectionalPca {
+                provider: ClusteringProvider::BuiltIn,
                 mode: ClusteringMode::Aggregation,
                 cluster_count: None,
                 random_seed: None,
@@ -3894,6 +4406,7 @@ mod tests {
         .unwrap();
         let explicit = resolved_built_in_planning(
             &ConfiguredClustering::DirectionalPca {
+                provider: ClusteringProvider::BuiltIn,
                 mode: ClusteringMode::Aggregation,
                 cluster_count: Some(3),
                 random_seed: None,
@@ -3952,6 +4465,7 @@ mod tests {
             },
             block_size_target: 65_536,
             clustering: EffectiveClusteringDiagnostics::DirectionalPca {
+                provider: ClusteringProvider::BuiltIn,
                 mode: ClusteringMode::Aggregation,
                 cluster_count: 2,
                 random_seed: Some(7),
@@ -3999,6 +4513,7 @@ mod tests {
                 remaining_unit_count: Some(3),
                 elapsed: Duration::from_secs(1),
                 error: Some("boom".into()),
+                adaptive_planning: None,
             },
             3,
             &sample_clustering_failure_diagnostics().embedding_health,
@@ -4030,6 +4545,7 @@ mod tests {
                 remaining_unit_count: Some(1),
                 elapsed: Duration::from_secs(1),
                 error: Some("boom".into()),
+                adaptive_planning: None,
             },
             3,
             &sample_clustering_failure_diagnostics().embedding_health,
@@ -4056,6 +4572,7 @@ mod tests {
         let block_size_target = serialized_branch_size(&embedding_spec, 3).unwrap();
         let omitted = resolved_built_in_planning(
             &ConfiguredClustering::Dcbc {
+                provider: ClusteringProvider::BuiltIn,
                 mode: ClusteringMode::Aggregation,
                 cluster_count: None,
                 balance_constraints: None,
@@ -4068,6 +4585,7 @@ mod tests {
         .unwrap();
         let explicit = resolved_built_in_planning(
             &ConfiguredClustering::Dcbc {
+                provider: ClusteringProvider::BuiltIn,
                 mode: ClusteringMode::Aggregation,
                 cluster_count: Some(3),
                 balance_constraints: None,
@@ -4092,6 +4610,7 @@ mod tests {
 
         let omitted = resolved_built_in_planning(
             &ConfiguredClustering::DirectionalPca {
+                provider: ClusteringProvider::BuiltIn,
                 mode: ClusteringMode::Aggregation,
                 cluster_count: None,
                 random_seed: None,
@@ -4117,6 +4636,7 @@ mod tests {
             }
             BuiltInPlanning::Dcbc(_) => panic!("expected directional-pca settings"),
             BuiltInPlanning::Hybrid(_) => panic!("expected directional-pca settings"),
+            BuiltInPlanning::Adaptive(_) => panic!("expected directional-pca settings"),
         }
     }
 
@@ -4145,6 +4665,7 @@ mod tests {
 
         let planning = resolved_built_in_planning(
             &ConfiguredClustering::Dcbc {
+                provider: ClusteringProvider::BuiltIn,
                 mode: ClusteringMode::Divisive,
                 cluster_count: Some(3),
                 balance_constraints: None,
@@ -4163,6 +4684,60 @@ mod tests {
             }
             BuiltInPlanning::DirectionalPca(_) => panic!("expected dcbc settings"),
             BuiltInPlanning::Hybrid(_) => panic!("expected dcbc settings"),
+            BuiltInPlanning::Adaptive(_) => panic!("expected dcbc settings"),
+        }
+    }
+
+    #[test]
+    fn adaptive_mode_maps_to_upstream_policy() {
+        let embedding_spec = EmbeddingSpec {
+            dims: 2,
+            encoding: "f32le".into(),
+        };
+        let block_size_target = serialized_branch_size(&embedding_spec, 3).unwrap();
+
+        let planning = resolved_built_in_planning(
+            &ConfiguredClustering::Adaptive {
+                provider: ClusteringProvider::BuiltIn,
+                mode: ClusteringMode::Divisive,
+                cluster_count: Some(3),
+                random_seed: Some(7),
+                balance_constraints: None,
+                params: lexongraph_directional_pca::DirectionalPcaParams {
+                    retained_dimension_count: 1,
+                    variance_exponent: 1.0,
+                    temperature: 1.0,
+                    min_input_count: 2,
+                    min_effective_rank: 1,
+                    min_cumulative_variance: 0.25,
+                },
+                pc1_explained_variance_ratio_threshold: 0.4,
+                dcbc_max_embedding_count: 4,
+            },
+            9,
+            block_size_target,
+            &embedding_spec,
+        )
+        .unwrap();
+
+        match planning {
+            BuiltInPlanning::Adaptive(settings) => {
+                assert_eq!(settings.direction, AdaptivePlanningDirection::Divisive);
+                assert_eq!(settings.directional_pca.cluster_count, 3);
+                assert_eq!(settings.directional_pca.random_seed, Some(7));
+                assert_eq!(settings.dcbc.cluster_count, 3);
+                assert_eq!(settings.dcbc.random_seed, Some(7));
+                assert_eq!(
+                    settings
+                        .divisive_switch
+                        .pc1_explained_variance_ratio_threshold,
+                    0.4
+                );
+                assert_eq!(settings.divisive_switch.dcbc_max_embedding_count, 4);
+            }
+            BuiltInPlanning::Dcbc(_) => panic!("expected adaptive settings"),
+            BuiltInPlanning::DirectionalPca(_) => panic!("expected adaptive settings"),
+            BuiltInPlanning::Hybrid(_) => panic!("expected adaptive settings"),
         }
     }
 
@@ -4230,11 +4805,322 @@ mod tests {
             remaining_unit_count: None,
             elapsed: Duration::from_millis(125),
             error: None,
+            adaptive_planning: None,
         };
 
         assert_eq!(
             format_indexing_status(status),
             "custom planning still running after 125 ms; processed 7 stage-local item(s)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_initial_adaptive_boundary() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 0,
+                    active_algorithm:
+                        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                    embedding_count: None,
+                    pc1_explained_variance_ratio: None,
+                    pc1_explained_variance_ratio_threshold: None,
+                    dcbc_max_embedding_count: None,
+                    reason: AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment,
+                },
+                active_subproblem: None,
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: initial adaptive boundary used directional-pca"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_adaptive_switch_to_dcbc() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 2,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 4,
+                    active_algorithm: lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc,
+                    switch_boundary_occurred: true,
+                    embedding_count: Some(875),
+                    pc1_explained_variance_ratio: Some(0.18),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason: AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit,
+                },
+                active_subproblem: None,
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 4 switched to dcbc (pc1_explained_variance_ratio=0.180000 < threshold=0.250000; embedding_count=875 < dcbc_max_embedding_count=1000)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_dcbc_after_earlier_switch() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 2,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 5,
+                    active_algorithm: lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc,
+                    switch_boundary_occurred: false,
+                    embedding_count: None,
+                    pc1_explained_variance_ratio: None,
+                    pc1_explained_variance_ratio_threshold: None,
+                    dcbc_max_embedding_count: None,
+                    reason: AdaptivePlanningDecisionReason::PreviouslySwitchedToDcbc,
+                },
+                active_subproblem: None,
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 5 stayed on dcbc after an earlier switch"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_directional_pca_pc1_comparison_values() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 3,
+                    active_algorithm:
+                        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                    embedding_count: Some(1200),
+                    pc1_explained_variance_ratio: Some(0.35),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason:
+                        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAbovePc1Threshold,
+                },
+                active_subproblem: None,
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: adaptive boundary 3 used directional-pca (pc1_explained_variance_ratio=0.350000 >= threshold=0.250000)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_directional_pca_embedding_limit_values() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 3,
+                    active_algorithm:
+                        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                    embedding_count: Some(1200),
+                    pc1_explained_variance_ratio: Some(0.12),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason: AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountLimit,
+                },
+                active_subproblem: None,
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: adaptive boundary 3 used directional-pca (pc1_explained_variance_ratio=0.120000 < threshold=0.250000; embedding_count=1200 >= dcbc_max_embedding_count=1000)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_agglomerative_cutoff_values() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 3,
+                    active_algorithm:
+                        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                    embedding_count: Some(1200),
+                    pc1_explained_variance_ratio: None,
+                    pc1_explained_variance_ratio_threshold: None,
+                    dcbc_max_embedding_count: Some(1000),
+                    reason: AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountCutoff,
+                },
+                active_subproblem: None,
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: adaptive boundary 3 stayed on directional-pca (embedding_count=1200 >= cutoff=1000)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_active_adaptive_subproblem() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 3,
+                    active_algorithm:
+                        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                    embedding_count: Some(1200),
+                    pc1_explained_variance_ratio: Some(0.35),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason:
+                        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAbovePc1Threshold,
+                },
+                active_subproblem: Some(
+                    lexongraph_streaming_indexer::AdaptivePlanningActiveSubproblemTelemetry {
+                        active_algorithm:
+                            lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                        active_subproblem_position: Some(4),
+                        completed_subproblem_count: 3,
+                        total_subproblem_count: None,
+                        active_dcbc_progress: None,
+                    },
+                ),
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: adaptive boundary 3 used directional-pca (pc1_explained_variance_ratio=0.350000 >= threshold=0.250000); active directional-pca subproblem 4 after completing 3 of ? subproblem(s)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_nested_dcbc_progress() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 2,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 4,
+                    active_algorithm: lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc,
+                    switch_boundary_occurred: true,
+                    embedding_count: Some(875),
+                    pc1_explained_variance_ratio: Some(0.18),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason: AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit,
+                },
+                active_subproblem: Some(
+                    lexongraph_streaming_indexer::AdaptivePlanningActiveSubproblemTelemetry {
+                        active_algorithm:
+                            lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc,
+                        active_subproblem_position: Some(1),
+                        completed_subproblem_count: 1,
+                        total_subproblem_count: None,
+                        active_dcbc_progress: Some(
+                            lexongraph_streaming_indexer::AdaptivePlanningNestedProgressTelemetry {
+                                completed_unit_count: Some(3),
+                                total_unit_count: Some(10),
+                            },
+                        ),
+                    },
+                ),
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 4 switched to dcbc (pc1_explained_variance_ratio=0.180000 < threshold=0.250000; embedding_count=875 < dcbc_max_embedding_count=1000); active dcbc subproblem 1 after completing 1 of ? subproblem(s); dcbc progress 3 of 10 unit(s)"
         );
     }
 
@@ -4249,6 +5135,7 @@ mod tests {
             remaining_unit_count: Some(5),
             elapsed: Duration::from_millis(250),
             error: None,
+            adaptive_planning: None,
         };
 
         assert_eq!(
@@ -4268,6 +5155,7 @@ mod tests {
             remaining_unit_count: Some(0),
             elapsed: Duration::from_millis(88),
             error: None,
+            adaptive_planning: None,
         };
 
         assert_eq!(
@@ -4287,6 +5175,7 @@ mod tests {
             remaining_unit_count: None,
             elapsed: Duration::from_millis(44),
             error: None,
+            adaptive_planning: None,
         };
 
         assert_eq!(
@@ -4306,6 +5195,7 @@ mod tests {
             remaining_unit_count: Some(3),
             elapsed: Duration::from_millis(0),
             error: None,
+            adaptive_planning: None,
         };
 
         assert_eq!(
@@ -4325,6 +5215,7 @@ mod tests {
             remaining_unit_count: None,
             elapsed: Duration::from_millis(0),
             error: None,
+            adaptive_planning: None,
         };
 
         assert_eq!(
@@ -4346,6 +5237,7 @@ mod tests {
             remaining_unit_count: None,
             elapsed: Duration::from_millis(125),
             error: Some("boom".into()),
+            adaptive_planning: None,
         };
 
         assert_eq!(
@@ -4365,6 +5257,7 @@ mod tests {
             remaining_unit_count: Some(1),
             elapsed: Duration::from_millis(88),
             error: Some("boom".into()),
+            adaptive_planning: None,
         };
 
         assert_eq!(
@@ -4410,6 +5303,7 @@ mod tests {
             &request_path,
             Some(ExecutionStage::IngestionAndEmbedding),
             ClusteringConfigOverrides {
+                clustering_provider: Some(ClusteringProvider::BuiltIn),
                 clustering_algorithm: Some(ClusteringAlgorithm::DirectionalPca),
                 clustering_min_cluster_occupancy: Some(1),
                 ..ClusteringConfigOverrides::default()

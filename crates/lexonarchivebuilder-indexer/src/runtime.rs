@@ -2712,10 +2712,59 @@ fn format_adaptive_planning_status(
         }
     };
     let compared_values = format_adaptive_compared_values(decision);
+    let active_subproblem = format_adaptive_active_subproblem(adaptive_planning.active_subproblem);
     format!(
-        "; adaptive pass {}: {detail}{compared_values}",
+        "; adaptive pass {}: {detail}{compared_values}{active_subproblem}",
         adaptive_planning.pass_number,
     )
+}
+
+fn format_adaptive_active_subproblem(
+    active_subproblem: Option<
+        lexongraph_streaming_indexer::AdaptivePlanningActiveSubproblemTelemetry,
+    >,
+) -> String {
+    let Some(active_subproblem) = active_subproblem else {
+        return String::new();
+    };
+
+    let algorithm = match active_subproblem.active_algorithm {
+        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca => "directional-pca",
+        lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc => "dcbc",
+    };
+    let subproblem_position = active_subproblem
+        .active_subproblem_position
+        .map(|position| position.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let total_subproblem_count = active_subproblem
+        .total_subproblem_count
+        .map(|total| total.to_string())
+        .unwrap_or_else(|| "?".into());
+    let nested_progress = format_adaptive_nested_progress(active_subproblem.active_dcbc_progress);
+
+    format!(
+        "; active {algorithm} subproblem {subproblem_position} after completing {} of {total_subproblem_count} subproblem(s){nested_progress}",
+        active_subproblem.completed_subproblem_count,
+    )
+}
+
+fn format_adaptive_nested_progress(
+    nested_progress: Option<lexongraph_streaming_indexer::AdaptivePlanningNestedProgressTelemetry>,
+) -> String {
+    let Some(nested_progress) = nested_progress else {
+        return String::new();
+    };
+    match (
+        nested_progress.completed_unit_count,
+        nested_progress.total_unit_count,
+    ) {
+        (Some(completed), Some(total)) => {
+            format!("; dcbc progress {completed} of {total} unit(s)")
+        }
+        (Some(completed), None) => format!("; dcbc progress {completed} unit(s)"),
+        (None, Some(total)) => format!("; dcbc total {total} unit(s)"),
+        (None, None) => String::new(),
+    }
 }
 
 fn format_adaptive_compared_values(
@@ -4791,6 +4840,7 @@ mod tests {
                     dcbc_max_embedding_count: None,
                     reason: AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment,
                 },
+                active_subproblem: None,
             }),
         };
 
@@ -4825,6 +4875,7 @@ mod tests {
                     dcbc_max_embedding_count: Some(1000),
                     reason: AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit,
                 },
+                active_subproblem: None,
             }),
         };
 
@@ -4859,6 +4910,7 @@ mod tests {
                     dcbc_max_embedding_count: None,
                     reason: AdaptivePlanningDecisionReason::PreviouslySwitchedToDcbc,
                 },
+                active_subproblem: None,
             }),
         };
 
@@ -4895,6 +4947,7 @@ mod tests {
                     reason:
                         AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAbovePc1Threshold,
                 },
+                active_subproblem: None,
             }),
         };
 
@@ -4930,6 +4983,7 @@ mod tests {
                     dcbc_max_embedding_count: Some(1000),
                     reason: AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountLimit,
                 },
+                active_subproblem: None,
             }),
         };
 
@@ -4965,12 +5019,108 @@ mod tests {
                     dcbc_max_embedding_count: Some(1000),
                     reason: AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountCutoff,
                 },
+                active_subproblem: None,
             }),
         };
 
         assert_eq!(
             format_indexing_status(status),
             "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: adaptive boundary 3 stayed on directional-pca (embedding_count=1200 >= cutoff=1000)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_active_adaptive_subproblem() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 3,
+                    active_algorithm:
+                        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                    embedding_count: Some(1200),
+                    pc1_explained_variance_ratio: Some(0.35),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason:
+                        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAbovePc1Threshold,
+                },
+                active_subproblem: Some(
+                    lexongraph_streaming_indexer::AdaptivePlanningActiveSubproblemTelemetry {
+                        active_algorithm:
+                            lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                        active_subproblem_position: Some(4),
+                        completed_subproblem_count: 3,
+                        total_subproblem_count: None,
+                        active_dcbc_progress: None,
+                    },
+                ),
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: adaptive boundary 3 used directional-pca (pc1_explained_variance_ratio=0.350000 >= threshold=0.250000); active directional-pca subproblem 4 after completing 3 of ? subproblem(s)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_nested_dcbc_progress() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 2,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 4,
+                    active_algorithm: lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc,
+                    switch_boundary_occurred: true,
+                    embedding_count: Some(875),
+                    pc1_explained_variance_ratio: Some(0.18),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason: AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit,
+                },
+                active_subproblem: Some(
+                    lexongraph_streaming_indexer::AdaptivePlanningActiveSubproblemTelemetry {
+                        active_algorithm:
+                            lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc,
+                        active_subproblem_position: Some(1),
+                        completed_subproblem_count: 1,
+                        total_subproblem_count: None,
+                        active_dcbc_progress: Some(
+                            lexongraph_streaming_indexer::AdaptivePlanningNestedProgressTelemetry {
+                                completed_unit_count: Some(3),
+                                total_unit_count: Some(10),
+                            },
+                        ),
+                    },
+                ),
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 4 switched to dcbc (pc1_explained_variance_ratio=0.180000 < threshold=0.250000; embedding_count=875 < dcbc_max_embedding_count=1000); active dcbc subproblem 1 after completing 1 of ? subproblem(s); dcbc progress 3 of 10 unit(s)"
         );
     }
 

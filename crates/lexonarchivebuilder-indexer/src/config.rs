@@ -6,7 +6,8 @@ use clap::{Args, ValueEnum};
 use lexongraph_block::EmbeddingSpec;
 use lexongraph_directional_pca::DirectionalPcaParams;
 use lexongraph_streaming_indexer::{
-    BalanceConstraints, DEFAULT_EMBEDDING_COUNT_CUTOFF, IndexItem, Metadata,
+    BalanceConstraints, DEFAULT_DCBC_MAX_EMBEDDING_COUNT,
+    DEFAULT_PC1_EXPLAINED_VARIANCE_RATIO_THRESHOLD, IndexItem, Metadata,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -134,7 +135,9 @@ pub struct ClusteringConfigOverrides {
     #[arg(long)]
     pub clustering_min_cumulative_variance: Option<f32>,
     #[arg(long)]
-    pub clustering_embedding_count_cutoff: Option<usize>,
+    pub clustering_pc1_explained_variance_ratio_threshold: Option<f32>,
+    #[arg(long)]
+    pub clustering_dcbc_max_embedding_count: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -160,7 +163,8 @@ pub(crate) enum ConfiguredClustering {
         random_seed: Option<u64>,
         balance_constraints: Option<BalanceConstraints>,
         params: DirectionalPcaParams,
-        embedding_count_cutoff: usize,
+        pc1_explained_variance_ratio_threshold: f32,
+        dcbc_max_embedding_count: usize,
     },
 }
 
@@ -201,8 +205,10 @@ impl ClusteringConfigOverrides {
                         .map(|_| "clustering_min_effective_rank"),
                     self.clustering_min_cumulative_variance
                         .map(|_| "clustering_min_cumulative_variance"),
-                    self.clustering_embedding_count_cutoff
-                        .map(|_| "clustering_embedding_count_cutoff"),
+                    self.clustering_pc1_explained_variance_ratio_threshold
+                        .map(|_| "clustering_pc1_explained_variance_ratio_threshold"),
+                    self.clustering_dcbc_max_embedding_count
+                        .map(|_| "clustering_dcbc_max_embedding_count"),
                 ]
                 .into_iter()
                 .flatten()
@@ -263,9 +269,18 @@ impl ClusteringConfigOverrides {
                         algorithm,
                     });
                 }
-                if self.clustering_embedding_count_cutoff.is_some() {
+                if self
+                    .clustering_pc1_explained_variance_ratio_threshold
+                    .is_some()
+                {
                     return Err(ConfigError::UnsupportedClusteringOptionForAlgorithm {
-                        option: "clustering_embedding_count_cutoff",
+                        option: "clustering_pc1_explained_variance_ratio_threshold",
+                        algorithm,
+                    });
+                }
+                if self.clustering_dcbc_max_embedding_count.is_some() {
+                    return Err(ConfigError::UnsupportedClusteringOptionForAlgorithm {
+                        option: "clustering_dcbc_max_embedding_count",
                         algorithm,
                     });
                 }
@@ -295,9 +310,18 @@ impl ClusteringConfigOverrides {
                         algorithm,
                     });
                 }
-                if self.clustering_embedding_count_cutoff.is_some() {
+                if self
+                    .clustering_pc1_explained_variance_ratio_threshold
+                    .is_some()
+                {
                     return Err(ConfigError::UnsupportedClusteringOptionForAlgorithm {
-                        option: "clustering_embedding_count_cutoff",
+                        option: "clustering_pc1_explained_variance_ratio_threshold",
+                        algorithm,
+                    });
+                }
+                if self.clustering_dcbc_max_embedding_count.is_some() {
+                    return Err(ConfigError::UnsupportedClusteringOptionForAlgorithm {
+                        option: "clustering_dcbc_max_embedding_count",
                         algorithm,
                     });
                 }
@@ -354,9 +378,12 @@ impl ClusteringConfigOverrides {
                     random_seed,
                     balance_constraints: self.to_balance_constraints(),
                     params: self.directional_pca_params(),
-                    embedding_count_cutoff: self
-                        .clustering_embedding_count_cutoff
-                        .unwrap_or(DEFAULT_EMBEDDING_COUNT_CUTOFF),
+                    pc1_explained_variance_ratio_threshold: self
+                        .clustering_pc1_explained_variance_ratio_threshold
+                        .unwrap_or(DEFAULT_PC1_EXPLAINED_VARIANCE_RATIO_THRESHOLD),
+                    dcbc_max_embedding_count: self
+                        .clustering_dcbc_max_embedding_count
+                        .unwrap_or(DEFAULT_DCBC_MAX_EMBEDDING_COUNT),
                 }
             }
             (
@@ -535,9 +562,19 @@ impl ClusteringConfigOverrides {
     }
 
     fn validate_adaptive_numeric_options(&self) -> Result<(), ConfigError> {
-        if matches!(self.clustering_embedding_count_cutoff, Some(0)) {
+        if let Some(pc1_explained_variance_ratio_threshold) =
+            self.clustering_pc1_explained_variance_ratio_threshold
+            && (!pc1_explained_variance_ratio_threshold.is_finite()
+                || !(0.0..=1.0).contains(&pc1_explained_variance_ratio_threshold))
+        {
             return Err(ConfigError::InvalidClusteringOption {
-                option: "clustering_embedding_count_cutoff",
+                option: "clustering_pc1_explained_variance_ratio_threshold",
+                message: "must be finite and in [0.0, 1.0]".into(),
+            });
+        }
+        if matches!(self.clustering_dcbc_max_embedding_count, Some(0)) {
+            return Err(ConfigError::InvalidClusteringOption {
+                option: "clustering_dcbc_max_embedding_count",
                 message: "must be at least 1".into(),
             });
         }
@@ -1115,7 +1152,8 @@ mod tests {
                 random_seed,
                 balance_constraints,
                 params,
-                embedding_count_cutoff,
+                pc1_explained_variance_ratio_threshold,
+                dcbc_max_embedding_count,
             } => {
                 assert_eq!(provider, ClusteringProvider::BuiltIn);
                 assert_eq!(mode, ClusteringMode::Aggregation);
@@ -1133,7 +1171,11 @@ mod tests {
                         min_cumulative_variance: DEFAULT_DIRECTIONAL_PCA_MIN_CUMULATIVE_VARIANCE,
                     }
                 );
-                assert_eq!(embedding_count_cutoff, DEFAULT_EMBEDDING_COUNT_CUTOFF);
+                assert_eq!(
+                    pc1_explained_variance_ratio_threshold,
+                    DEFAULT_PC1_EXPLAINED_VARIANCE_RATIO_THRESHOLD
+                );
+                assert_eq!(dcbc_max_embedding_count, DEFAULT_DCBC_MAX_EMBEDDING_COUNT);
             }
             ConfiguredClustering::Dcbc { .. } => {
                 panic!("expected adaptive settings when that algorithm is selected")
@@ -1311,11 +1353,11 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_rejects_zero_embedding_count_cutoff() {
+    fn adaptive_rejects_nan_pc1_explained_variance_ratio_threshold() {
         let error = ClusteringConfigOverrides {
             clustering_provider: Some(ClusteringProvider::BuiltIn),
             clustering_algorithm: Some(ClusteringAlgorithm::Adaptive),
-            clustering_embedding_count_cutoff: Some(0),
+            clustering_pc1_explained_variance_ratio_threshold: Some(f32::NAN),
             ..ClusteringConfigOverrides::default()
         }
         .validate()
@@ -1324,7 +1366,27 @@ mod tests {
         assert!(matches!(
             error,
             ConfigError::InvalidClusteringOption {
-                option: "clustering_embedding_count_cutoff",
+                option: "clustering_pc1_explained_variance_ratio_threshold",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn adaptive_rejects_zero_dcbc_max_embedding_count() {
+        let error = ClusteringConfigOverrides {
+            clustering_provider: Some(ClusteringProvider::BuiltIn),
+            clustering_algorithm: Some(ClusteringAlgorithm::Adaptive),
+            clustering_dcbc_max_embedding_count: Some(0),
+            ..ClusteringConfigOverrides::default()
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidClusteringOption {
+                option: "clustering_dcbc_max_embedding_count",
                 ..
             }
         ));

@@ -35,7 +35,8 @@ Supported clustering flags:
   --clustering-min-input-count
   --clustering-min-effective-rank
   --clustering-min-cumulative-variance
-  --clustering-embedding-count-cutoff
+  --clustering-pc1-explained-variance-ratio-threshold
+  --clustering-dcbc-max-embedding-count
 EOF
 }
 
@@ -186,7 +187,8 @@ while [[ $# -gt 0 ]]; do
     --clustering-min-input-count|\
     --clustering-min-effective-rank|\
     --clustering-min-cumulative-variance|\
-    --clustering-embedding-count-cutoff)
+    --clustering-pc1-explained-variance-ratio-threshold|\
+    --clustering-dcbc-max-embedding-count)
       [[ $# -ge 2 ]] || { printf 'error: %s requires a value\n' "$1" >&2; exit 1; }
       append_indexer_option "$1" "$2"
       shift 2

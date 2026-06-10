@@ -375,7 +375,9 @@ mod tests {
             "1",
             "--clustering-min-cumulative-variance",
             "0.25",
-            "--clustering-embedding-count-cutoff",
+            "--clustering-pc1-explained-variance-ratio-threshold",
+            "0.4",
+            "--clustering-dcbc-max-embedding-count",
             "400",
         ])
         .unwrap();
@@ -402,7 +404,11 @@ mod tests {
                 assert_eq!(clustering.clustering_min_input_count, Some(2));
                 assert_eq!(clustering.clustering_min_effective_rank, Some(1));
                 assert_eq!(clustering.clustering_min_cumulative_variance, Some(0.25));
-                assert_eq!(clustering.clustering_embedding_count_cutoff, Some(400));
+                assert_eq!(
+                    clustering.clustering_pc1_explained_variance_ratio_threshold,
+                    Some(0.4)
+                );
+                assert_eq!(clustering.clustering_dcbc_max_embedding_count, Some(400));
             }
             _ => panic!("expected run command"),
         }

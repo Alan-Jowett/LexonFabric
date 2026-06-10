@@ -1114,8 +1114,10 @@ When the selected algorithm is `adaptive`, the CLI additionally exposes one
 adaptive switch-criteria family plus explicit branch-specific option families
 for the adaptive directional-PCA and DCBC sub-policies.
 
-**[KNOWN]:** The current CLI exposes `--clustering-mean-cluster-radius-threshold`
-as the adaptive switch criterion, alongside the already-approved shared,
+**[KNOWN]:** The current CLI exposes
+`--clustering-pc1-explained-variance-ratio-threshold` and
+`--clustering-dcbc-max-embedding-count` as the adaptive switch criteria for
+the built-in adaptive divisive path, alongside the already-approved shared,
 directional-PCA, and DCBC flag families.
 
 LexonArchiveBuilder parses these flags after loading the request file and

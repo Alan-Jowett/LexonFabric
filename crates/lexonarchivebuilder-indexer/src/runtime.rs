@@ -12,8 +12,8 @@ use lexongraph_block::{
 use lexongraph_block_store::{BlockStore, BlockStoreError};
 use lexongraph_embeddings_trait::{EmbeddingInput, EmbeddingProvider};
 use lexongraph_streaming_indexer::{
-    AdaptiveDcbcSettings, AdaptivePlanningDecisionReason, AdaptivePlanningDirection,
-    AdaptivePlanningSettings, AdaptivePlanningStatusTelemetry,
+    AdaptiveDcbcSettings, AdaptiveDivisiveSwitchSettings, AdaptivePlanningDecisionReason,
+    AdaptivePlanningDirection, AdaptivePlanningSettings, AdaptivePlanningStatusTelemetry,
     ArithmeticMeanCanonicalEmbeddingPolicy, BuiltInPlanning, BuiltInPlanningDirection,
     ContentResolver, DcbcBuiltInPlanningSettings, DcbcStreamingClusteringFactory,
     DirectionalPcaBuiltInPlanningSettings, HierarchicalPlanningPolicy, IndexItem, PlanningStage,
@@ -114,7 +114,8 @@ enum EffectiveClusteringDiagnostics {
         min_effective_rank: usize,
         min_cumulative_variance: f32,
         balance_constraints: Option<BalanceConstraintsDiagnostics>,
-        embedding_count_cutoff: usize,
+        pc1_explained_variance_ratio_threshold: f32,
+        dcbc_max_embedding_count: usize,
     },
 }
 
@@ -630,7 +631,8 @@ fn resolved_built_in_planning(
             random_seed,
             balance_constraints,
             params,
-            embedding_count_cutoff: _,
+            pc1_explained_variance_ratio_threshold,
+            dcbc_max_embedding_count,
         } => {
             if *provider != ClusteringProvider::BuiltIn {
                 return Err(AutoSizingBuiltInPlanningError::DeriveClusterCount(
@@ -660,6 +662,10 @@ fn resolved_built_in_planning(
                     )?,
                     balance_constraints: balance_constraints.clone(),
                     random_seed: *random_seed,
+                },
+                divisive_switch: AdaptiveDivisiveSwitchSettings {
+                    pc1_explained_variance_ratio_threshold: *pc1_explained_variance_ratio_threshold,
+                    dcbc_max_embedding_count: *dcbc_max_embedding_count,
                 },
             })
         }
@@ -839,7 +845,8 @@ fn effective_clustering_diagnostics(
         }
         ConfiguredClustering::Adaptive {
             provider,
-            embedding_count_cutoff,
+            pc1_explained_variance_ratio_threshold,
+            dcbc_max_embedding_count,
             ..
         } => {
             let clustering = resolved_built_in_planning(
@@ -878,7 +885,8 @@ fn effective_clustering_diagnostics(
                             soft_balance_penalty: constraints.soft_balance_penalty,
                         }
                     }),
-                    embedding_count_cutoff: *embedding_count_cutoff,
+                    pc1_explained_variance_ratio_threshold: *pc1_explained_variance_ratio_threshold,
+                    dcbc_max_embedding_count: *dcbc_max_embedding_count,
                 },
                 BuiltInPlanning::Dcbc(_) => return None,
                 BuiltInPlanning::DirectionalPca(_) => return None,
@@ -2653,26 +2661,53 @@ fn format_adaptive_planning_status(
         return String::new();
     };
     let decision = adaptive_planning.decision;
-    let detail = match (decision.reason, decision.boundary_position) {
-        (AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment, 0) => {
+    let detail = match (
+        decision.reason,
+        decision.boundary_position,
+        decision.switch_boundary_occurred,
+    ) {
+        (AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment, 0, _) => {
             "initial adaptive boundary used directional-pca".to_string()
         }
         (
+            AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAbovePc1Threshold,
+            boundary_position,
+            _,
+        )
+        | (
+            AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountLimit,
+            boundary_position,
+            _,
+        ) => format!("adaptive boundary {boundary_position} used directional-pca"),
+        (
             AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountCutoff,
             boundary_position,
-        ) => {
-            format!("adaptive boundary {boundary_position} stayed on directional-pca")
-        }
+            _,
+        ) => format!("adaptive boundary {boundary_position} stayed on directional-pca"),
         (
+            AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit,
+            boundary_position,
+            true,
+        )
+        | (
             AdaptivePlanningDecisionReason::SwitchedToDcbcBelowEmbeddingCountCutoff,
             boundary_position,
-        ) => {
-            format!("adaptive boundary {boundary_position} switched to dcbc")
-        }
-        (AdaptivePlanningDecisionReason::PreviouslySwitchedToDcbc, boundary_position) => {
+            true,
+        ) => format!("adaptive boundary {boundary_position} switched to dcbc"),
+        (
+            AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit,
+            boundary_position,
+            false,
+        )
+        | (
+            AdaptivePlanningDecisionReason::SwitchedToDcbcBelowEmbeddingCountCutoff,
+            boundary_position,
+            false,
+        ) => format!("adaptive boundary {boundary_position} used dcbc"),
+        (AdaptivePlanningDecisionReason::PreviouslySwitchedToDcbc, boundary_position, _) => {
             format!("adaptive boundary {boundary_position} stayed on dcbc after an earlier switch")
         }
-        (AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment, boundary_position) => {
+        (AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment, boundary_position, _) => {
             format!("adaptive boundary {boundary_position} used directional-pca")
         }
     };
@@ -2686,18 +2721,63 @@ fn format_adaptive_planning_status(
 fn format_adaptive_compared_values(
     decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry,
 ) -> String {
-    let (Some(embedding_count), Some(embedding_count_cutoff)) =
-        (decision.embedding_count, decision.embedding_count_cutoff)
-    else {
-        return String::new();
-    };
-
-    let comparator = if decision.switch_boundary_occurred {
-        "<"
-    } else {
-        ">="
-    };
-    format!(" (embedding_count={embedding_count} {comparator} cutoff={embedding_count_cutoff})")
+    match decision.reason {
+        AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment
+        | AdaptivePlanningDecisionReason::PreviouslySwitchedToDcbc => String::new(),
+        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAbovePc1Threshold => {
+            let (Some(pc1), Some(threshold)) = (
+                decision.pc1_explained_variance_ratio,
+                decision.pc1_explained_variance_ratio_threshold,
+            ) else {
+                return String::new();
+            };
+            format!(
+                " (pc1_explained_variance_ratio={pc1:.6} >= threshold={threshold:.6})"
+            )
+        }
+        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountLimit => {
+            let (Some(pc1), Some(threshold), Some(embedding_count), Some(limit)) = (
+                decision.pc1_explained_variance_ratio,
+                decision.pc1_explained_variance_ratio_threshold,
+                decision.embedding_count,
+                decision.dcbc_max_embedding_count,
+            ) else {
+                return String::new();
+            };
+            format!(
+                " (pc1_explained_variance_ratio={pc1:.6} < threshold={threshold:.6}; embedding_count={embedding_count} >= dcbc_max_embedding_count={limit})"
+            )
+        }
+        AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit => {
+            let (Some(pc1), Some(threshold), Some(embedding_count), Some(limit)) = (
+                decision.pc1_explained_variance_ratio,
+                decision.pc1_explained_variance_ratio_threshold,
+                decision.embedding_count,
+                decision.dcbc_max_embedding_count,
+            ) else {
+                return String::new();
+            };
+            format!(
+                " (pc1_explained_variance_ratio={pc1:.6} < threshold={threshold:.6}; embedding_count={embedding_count} < dcbc_max_embedding_count={limit})"
+            )
+        }
+        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountCutoff => {
+            let (Some(embedding_count), Some(cutoff)) =
+                (decision.embedding_count, decision.dcbc_max_embedding_count)
+            else {
+                return String::new();
+            };
+            format!(" (embedding_count={embedding_count} >= cutoff={cutoff})")
+        }
+        AdaptivePlanningDecisionReason::SwitchedToDcbcBelowEmbeddingCountCutoff => {
+            let (Some(embedding_count), Some(cutoff)) =
+                (decision.embedding_count, decision.dcbc_max_embedding_count)
+            else {
+                return String::new();
+            };
+            format!(" (embedding_count={embedding_count} < cutoff={cutoff})")
+        }
+    }
 }
 
 fn report_progress(progress: &ProgressReporter, message: String) {
@@ -3993,7 +4073,8 @@ mod tests {
                 clustering_min_input_count: Some(2),
                 clustering_min_effective_rank: Some(1),
                 clustering_min_cumulative_variance: Some(0.0),
-                clustering_embedding_count_cutoff: Some(2),
+                clustering_pc1_explained_variance_ratio_threshold: Some(0.25),
+                clustering_dcbc_max_embedding_count: Some(2),
                 ..ClusteringConfigOverrides::default()
             },
         )
@@ -4581,7 +4662,8 @@ mod tests {
                     min_effective_rank: 1,
                     min_cumulative_variance: 0.25,
                 },
-                embedding_count_cutoff: 4,
+                pc1_explained_variance_ratio_threshold: 0.4,
+                dcbc_max_embedding_count: 4,
             },
             9,
             block_size_target,
@@ -4596,6 +4678,13 @@ mod tests {
                 assert_eq!(settings.directional_pca.random_seed, Some(7));
                 assert_eq!(settings.dcbc.cluster_count, 3);
                 assert_eq!(settings.dcbc.random_seed, Some(7));
+                assert_eq!(
+                    settings
+                        .divisive_switch
+                        .pc1_explained_variance_ratio_threshold,
+                    0.4
+                );
+                assert_eq!(settings.divisive_switch.dcbc_max_embedding_count, 4);
             }
             BuiltInPlanning::Dcbc(_) => panic!("expected adaptive settings"),
             BuiltInPlanning::DirectionalPca(_) => panic!("expected adaptive settings"),
@@ -4697,7 +4786,9 @@ mod tests {
                         lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
                     switch_boundary_occurred: false,
                     embedding_count: None,
-                    embedding_count_cutoff: None,
+                    pc1_explained_variance_ratio: None,
+                    pc1_explained_variance_ratio_threshold: None,
+                    dcbc_max_embedding_count: None,
                     reason: AdaptivePlanningDecisionReason::InitialDirectionalPcaSegment,
                 },
             }),
@@ -4729,15 +4820,17 @@ mod tests {
                     active_algorithm: lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc,
                     switch_boundary_occurred: true,
                     embedding_count: Some(875),
-                    embedding_count_cutoff: Some(1000),
-                    reason: AdaptivePlanningDecisionReason::SwitchedToDcbcBelowEmbeddingCountCutoff,
+                    pc1_explained_variance_ratio: Some(0.18),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason: AdaptivePlanningDecisionReason::SelectedDcbcBelowPc1ThresholdAndBelowEmbeddingCountLimit,
                 },
             }),
         };
 
         assert_eq!(
             format_indexing_status(status),
-            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 4 switched to dcbc (embedding_count=875 < cutoff=1000)"
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 2: adaptive boundary 4 switched to dcbc (pc1_explained_variance_ratio=0.180000 < threshold=0.250000; embedding_count=875 < dcbc_max_embedding_count=1000)"
         );
     }
 
@@ -4761,7 +4854,9 @@ mod tests {
                     active_algorithm: lexongraph_streaming_indexer::ActivePlanningAlgorithm::Dcbc,
                     switch_boundary_occurred: false,
                     embedding_count: None,
-                    embedding_count_cutoff: None,
+                    pc1_explained_variance_ratio: None,
+                    pc1_explained_variance_ratio_threshold: None,
+                    dcbc_max_embedding_count: None,
                     reason: AdaptivePlanningDecisionReason::PreviouslySwitchedToDcbc,
                 },
             }),
@@ -4774,7 +4869,7 @@ mod tests {
     }
 
     #[test]
-    fn hierarchy_planning_progress_reports_directional_pca_comparison_values() {
+    fn hierarchy_planning_progress_reports_directional_pca_pc1_comparison_values() {
         let status = StreamingIndexingStatus {
             phase: StreamingIndexingPhase::HierarchyPlanning {
                 stage: PlanningStage::Custom,
@@ -4794,7 +4889,80 @@ mod tests {
                         lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
                     switch_boundary_occurred: false,
                     embedding_count: Some(1200),
-                    embedding_count_cutoff: Some(1000),
+                    pc1_explained_variance_ratio: Some(0.35),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason:
+                        AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAbovePc1Threshold,
+                },
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: adaptive boundary 3 used directional-pca (pc1_explained_variance_ratio=0.350000 >= threshold=0.250000)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_directional_pca_embedding_limit_values() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 3,
+                    active_algorithm:
+                        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                    embedding_count: Some(1200),
+                    pc1_explained_variance_ratio: Some(0.12),
+                    pc1_explained_variance_ratio_threshold: Some(0.25),
+                    dcbc_max_embedding_count: Some(1000),
+                    reason: AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountLimit,
+                },
+            }),
+        };
+
+        assert_eq!(
+            format_indexing_status(status),
+            "custom planning still running after 125 ms; processed 7 stage-local item(s); adaptive pass 1: adaptive boundary 3 used directional-pca (pc1_explained_variance_ratio=0.120000 < threshold=0.250000; embedding_count=1200 >= dcbc_max_embedding_count=1000)"
+        );
+    }
+
+    #[test]
+    fn hierarchy_planning_progress_reports_agglomerative_cutoff_values() {
+        let status = StreamingIndexingStatus {
+            phase: StreamingIndexingPhase::HierarchyPlanning {
+                stage: PlanningStage::Custom,
+            },
+            state: StreamingIndexingStatusState::InProgress,
+            item_count: 7,
+            phase_total_unit_count: None,
+            completed_unit_count: 7,
+            remaining_unit_count: None,
+            elapsed: Duration::from_millis(125),
+            error: None,
+            adaptive_planning: Some(AdaptivePlanningStatusTelemetry {
+                pass_number: 1,
+                decision: lexongraph_streaming_indexer::AdaptivePlanningDecisionTelemetry {
+                    boundary_position: 3,
+                    active_algorithm:
+                        lexongraph_streaming_indexer::ActivePlanningAlgorithm::DirectionalPca,
+                    switch_boundary_occurred: false,
+                    embedding_count: Some(1200),
+                    pc1_explained_variance_ratio: None,
+                    pc1_explained_variance_ratio_threshold: None,
+                    dcbc_max_embedding_count: Some(1000),
                     reason: AdaptivePlanningDecisionReason::StayedOnDirectionalPcaAtOrAboveEmbeddingCountCutoff,
                 },
             }),
